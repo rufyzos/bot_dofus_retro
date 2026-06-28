@@ -74,6 +74,8 @@ class GameState:
         if fields:
             self.map_id = fields[0]
             print(f"[GameState] Mapa: {self.map_id}")
+            if self.on_map_changed:
+                self.on_map_changed(self.map_id)
 
     def handle_gts(self, fields: list[str]):
         """GTS — Game Turn Start. Formato: GTS<fighter_id>|<time_ms>"""

@@ -6,33 +6,33 @@ Ejecutar como administrador (puerto 443).
 
     python bot.py
 
-Flujo:
-  1. DofusProxy escucha en :443 (login) y :5556 (game).
-  2. El cliente conecta → proxy reenvía al servidor real.
-  3. Al recibir AYK, el proxy reescribe host:port → 127.0.0.1:5556.
-  4. Cuando la sesión de game se abre, el Injector se engancha a los sockets.
-  5. Dispatcher despacha cada paquete a GameState / FightState.
-  6. CombatAI reacciona via callbacks de GameState.
+Flujo multisesión:
+  1. DofusProxy escucha en :443 (login).
+  2. Cada cliente que conecta crea una Session propia con puerto game dedicado.
+  3. La Session tiene sus propios GameState / FightState / CombatAI / Inventory…
+  4. El Orchestrator coordina líder + mulas.
+  5. Cada paquete se despacha al Dispatcher de su sesión (buffers aislados).
 """
 
-import sys
 import time
-import signal
-import threading
 
 import config
 from proxy.tcp_proxy import DofusProxy
-from proxy.injector import Injector
-from protocol.dispatcher import Dispatcher, DIRECTION_CLIENT, DIRECTION_SERVER
-from game.state import state
-from game.fight import FightState
-from game.combat_ai import CombatAI
+from core.session import Session
+from core.orchestrator import orchestrator
+from game.world import map_data as map_data_mod
+from game.world import world_graph as world_graph_mod
+
+# ── Depuración: headers que se loguean en crudo ───────────────────────────────
+DEBUG_HEADERS = {"GS", "GTS", "GTF", "GTL", "GIC", "GIE", "GE", "As", "GA",
+                 "HG", "AT", "ATK", "AYK"}
 
 
 def main():
     print("=" * 60)
-    print("  Dofus Retro Bot — Python MITM")
-    print(f"  DRY_RUN = {config.DRY_RUN}")
+    print("  Dofus Retro Bot — Python MITM Multisesión")
+    print(f"  DRY_RUN   = {config.DRY_RUN}")
+    print(f"  ARCHETYPE = {getattr(config, 'ARCHETYPE', 'ranged')}")
     print(f"  Login upstream: {config.REAL_LOGIN_HOST}:{config.REAL_LOGIN_PORT}")
     print("=" * 60)
     print()
@@ -40,49 +40,41 @@ def main():
     print("  127.0.0.1  dofusretro-co-production.ankama-games.com")
     print()
 
-    # ── Inicializar componentes ────────────────────────────────────────
-    dispatcher = Dispatcher()
-    injector   = Injector()
-    fight      = FightState()
-    ai         = CombatAI(state, fight, injector)
+    # ── Inicializar BD de mapas y grafo de mundo ───────────────────────
+    map_data_mod.init(getattr(config, "MAP_DB_PATH", "data/maps.json"))
+    world_graph_mod.init(getattr(config, "WORLD_GRAPH_PATH", "data/world_graph.json"))
 
-    state.register_handlers(dispatcher)
-    fight.register_handlers(dispatcher)
-    ai.attach()
+    # ── Callback de creación de sesión (multisesión) ───────────────────
+    def on_session_created(session_id: int):
+        session = Session(session_id)
+        session.wire()
+        orchestrator.add_session(session)
+        orchestrator.hook_session(session)
 
-    # GS lo parsea FightState (handle_gs) y luego notifica a GameState
-    fight.on_fight_start = state.handle_fight_start
-    # Cuando GameState recibe ASK y conoce el char_id, avisar a FightState
-    state.on_char_id_known = fight.set_my_fighter_id
+        def on_packet(direction: str, raw: str):
+            from protocol.messages import header_of
+            hdr = header_of(raw)
+            if hdr in DEBUG_HEADERS:
+                print(f"[S{session_id} RAW {direction}] {raw[:120]!r}")
+            if direction == "C→S" and session.state.in_fight:
+                print(f"[S{session_id} CLIENT C→S] {raw[:120]!r}")
+            session.on_packet(direction, raw)
 
-    # ── Proxy ─────────────────────────────────────────────────────────
-    # Headers que queremos ver crudos para depurar el mapeo de IDs de combate.
-    DEBUG_HEADERS = ("GS", "GTS", "GTF", "GTL", "GIC", "GIE", "GE", "As", "GA")
+        def on_game(server_sock, client_sock):
+            session.on_game_connected(server_sock, client_sock)
 
-    def on_packet(direction: str, raw: str):
-        from protocol.messages import header_of
-        hdr = header_of(raw)
-        if hdr in DEBUG_HEADERS:
-            print(f"[RAW {direction}] {raw[:120]!r}")
-        # Loguear todo C→S durante combate para capturar el formato real del cast
-        if direction == "C→S" and state.in_fight:
-            print(f"[CLIENT C→S] {raw[:120]!r}")
-        dispatcher.dispatch(direction, raw)
+        return on_packet, on_game
 
-    def on_game_session(server_sock, client_sock):
-        """Llamado cuando la conexión al game server se establece."""
-        print("[Bot] Sesión de game activa — Injector conectado.")
-        injector.attach(server_sock, client_sock)
-
+    # ── Proxy ──────────────────────────────────────────────────────────
     proxy = DofusProxy(
-        on_packet=on_packet,
-        on_game_session=on_game_session,
+        on_session_created=on_session_created,
         real_login_host=config.REAL_LOGIN_HOST,
         real_login_port=config.REAL_LOGIN_PORT,
     )
     proxy.start()
 
     print("Proxy activo. Abre el Ankama Launcher → Play.")
+    print("Cada cuenta que conecte crea una sesión independiente.")
     print("Ctrl+C para detener.\n")
 
     try:
@@ -90,8 +82,6 @@ def main():
             time.sleep(1)
     except KeyboardInterrupt:
         print("\n[Bot] Deteniendo...")
-        ai.detach()
-        injector.detach()
         proxy.stop()
         print("[Bot] Hasta la próxima.")
 

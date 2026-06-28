@@ -57,6 +57,36 @@ JS   = "JS"    # S→C  JobSkills — habilidades de oficio
 JX   = "JX"    # S→C  JobXP — experiencia de oficio
 JO   = "JO"    # S→C  JobChangeStats — opciones de oficio
 
+# ── Inventario / objetos ───────────────────────────────────────────────────────
+OAK  = "OAK"   # S→C  Objeto añadido al inventario
+OR   = "OR"    # S→C  Objeto eliminado del inventario
+OQ   = "OQ"    # S→C  Cambio de cantidad de objeto
+Ow   = "Ow"    # S→C  Peso/pods del inventario
+
+# ── Diálogos PNJ ──────────────────────────────────────────────────────────────
+DC   = "DC"    # C→S  Iniciar diálogo con PNJ
+DCK  = "DCK"   # S→C  Diálogo creado (éxito)
+DCE  = "DCE"   # S→C  Diálogo error
+DQ   = "DQ"    # S→C  Pregunta/opciones del PNJ
+DR   = "DR"    # C→S  Respuesta del jugador
+DV   = "DV"    # C↔S  Salir del diálogo
+
+# ── HDV (Exchange big-store) ──────────────────────────────────────────────────
+EHT  = "EHT"   # C→S  Seleccionar tipo/categoría de HDV
+EHL  = "EHL"   # S→C  Lista de tipos de ítems en HDV
+EHl  = "EHl"   # C→S/S→C  Pedir/recibir lotes de un ítem concreto
+EHP  = "EHP"   # C→S/S→C  Pedir/recibir precio medio de un ítem
+EHB  = "EHB"   # C→S  Comprar lote en HDV
+EHS  = "EHS"   # C→S  Buscar ítem en HDV
+EHSK = "EHSK"  # S→C  Resultado de búsqueda en HDV (éxito)
+EHSE = "EHSE"  # S→C  Resultado de búsqueda en HDV (error)
+ES   = "ES"    # C→S  Poner en venta (ExchangeMovementSell)
+ESK  = "ESK"   # S→C  Venta exitosa
+ESE  = "ESE"   # S→C  Error en venta
+EBK  = "EBK"   # S→C  Compra exitosa
+EBE  = "EBE"   # S→C  Error en compra
+EV   = "EV"    # C→S  Salir de intercambio/HDV
+
 # Cast de hechizo (C→S): GA<seq>\n<spell_id>;<cell_id>\n\x00
 CAST_SPELL  = "GA"
 FIGHT_END   = "GE"

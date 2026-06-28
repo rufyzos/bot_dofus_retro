@@ -1,34 +1,37 @@
 """
-CombatAI — lógica de decisión para el turno de combate.
+CombatAI — runner de turno de combate.
 
-Flujo por turno:
-  1. GameState.on_my_turn dispara play_turn()
-  2. Evalúa enemigos en FightState
-  3. Elige el mejor hechizo casteable (alcance + AP disponibles)
-  4. Opcionalmente mueve para entrar en rango (consume MP)
-  5. Castea hasta agotar AP
-  6. Pasa turno con Gt
+Construye el TurnContext y delega la decisión al Archetype configurado
+en config.ARCHETYPE ("ranged", "melee", "support", "summoner").
 
-DRY_RUN (config.DRY_RUN = True): solo logea la acción, no inyecta nada.
+Flujo:
+  1. GameState.on_my_turn dispara _play_turn()
+  2. Se construye TurnContext con el estado actual
+  3. El Archetype elegido ejecuta su estrategia
+  4. Se pasa turno con ClickActuator.pass_turn()
+
+DRY_RUN (config.DRY_RUN = True): solo logea acciones, no mueve el ratón.
 """
 
 from __future__ import annotations
 import threading
 
 from game.state import GameState
-from game.fight import FightState, Fighter
-from game.spell import SpellConfig
-from proxy.injector import Injector
+from game.fight import FightState
+from game.ai.base import TurnContext
+from game.ai.registry import get_archetype
+from input.actuator import ClickActuator
 from utils.timing import human_delay
 import config
 
 
 class CombatAI:
-    def __init__(self, state: GameState, fight: FightState, injector: Injector):
+    def __init__(self, state: GameState, fight: FightState, actuator: ClickActuator):
         self._state = state
         self._fight = fight
-        self._injector = injector
+        self._actuator = actuator
         self._lock = threading.Lock()
+        self._turn_number = 0
 
     def attach(self):
         """Conecta callbacks de GameState a este AI."""
@@ -46,191 +49,68 @@ class CombatAI:
     # ------------------------------------------------------------------
 
     def _on_fight_start(self, fields: list[str]):
+        self._turn_number = 0
         me = self._fight.me()
-        print(f"[CombatAI] Combate iniciado — me={me} enemies={len(self._fight.enemies())}")
+        archetype = getattr(config, "ARCHETYPE", "ranged")
+        print(f"[CombatAI] Combate iniciado — arquetipo={archetype} "
+              f"me={me} enemies={len(self._fight.enemies())}")
 
     def _on_fight_end(self, fields: list[str]):
         print("[CombatAI] Combate terminado.")
+        self._turn_number = 0
 
     # ------------------------------------------------------------------
-    # Lógica del turno
+    # Runner del turno
     # ------------------------------------------------------------------
 
     def _play_turn(self):
         with self._lock:
-            print("[CombatAI] Es mi turno.")
+            self._turn_number += 1
+            print(f"[CombatAI] Mi turno #{self._turn_number}")
+
             me = self._fight.me()
             if not me:
                 print("[CombatAI] No encontré mi fighter — paso turno.")
                 self._pass_turn()
                 return
 
-            # GIC no trae AP/MP — usar los del GameState (actualizados por As) o config
-            remaining_ap = me.ap if me.ap > 0 else (self._state.ap if self._state.ap > 0 else config.DEFAULT_AP)
-            remaining_mp = me.mp if me.mp > 0 else (self._state.mp if self._state.mp > 0 else config.DEFAULT_MP)
+            enemies = self._fight.enemies()
+            if not enemies:
+                print("[CombatAI] Sin enemigos vivos — paso turno.")
+                self._pass_turn()
+                return
+
+            # AP/MP: preferir los del fighter, luego GameState, luego config
+            remaining_ap = (me.ap if me.ap > 0
+                            else (self._state.ap if self._state.ap > 0
+                                  else config.DEFAULT_AP))
+            remaining_mp = (me.mp if me.mp > 0
+                            else (self._state.mp if self._state.mp > 0
+                                  else config.DEFAULT_MP))
             print(f"[CombatAI] AP={remaining_ap} MP={remaining_mp} cell={me.cell}")
-            spells: list[SpellConfig] = config.SPELLS
 
-            for _ in range(10):  # máx 10 iteraciones para evitar bucle infinito
-                enemies = self._fight.enemies()
-                if not enemies:
-                    print("[CombatAI] Sin enemigos vivos — paso turno.")
-                    break
+            ctx = TurnContext(
+                me=me,
+                enemies=enemies,
+                allies=self._fight.allies(),
+                remaining_ap=remaining_ap,
+                remaining_mp=remaining_mp,
+                fight=self._fight,
+                actuator=self._actuator,
+                spells=config.SPELLS,
+                turn_number=self._turn_number,
+            )
 
-                target = self._choose_target(enemies, me.cell)
-                if not target:
-                    break
-
-                spell = self._choose_spell(spells, remaining_ap, me.cell, target.cell)
-
-                if spell is None:
-                    # Intentar moverse para entrar en rango
-                    moved = self._try_move_into_range(spells, remaining_ap,
-                                                       remaining_mp, me, enemies)
-                    if moved:
-                        remaining_mp -= moved
-                        # Recalcular posición de me
-                        me = self._fight.me()
-                        if not me:
-                            break
-                        continue
-                    else:
-                        print("[CombatAI] Sin hechizo casteable ni movimiento útil — paso turno.")
-                        break
-
-                # Castear
-                self._cast_spell(spell, target)
-                remaining_ap -= spell.ap_cost
-                human_delay(config.DELAY_CAST_MS, config.DELAY_JITTER)
-
-                if remaining_ap <= 0:
-                    break
+            try:
+                archetype = get_archetype()
+                ap_used, mp_used = archetype.play_turn(ctx)
+                print(f"[CombatAI] Turno completado — AP usados={ap_used} MP usados={mp_used}")
+            except Exception as exc:
+                print(f"[CombatAI] ERROR en arquetipo: {exc}")
 
             self._pass_turn()
 
-    def _choose_target(self, enemies: list[Fighter], my_cell: int) -> Fighter | None:
-        strategy = config.TARGET_STRATEGY
-        if strategy == "nearest":
-            return self._fight.nearest_enemy(my_cell)
-        elif strategy == "lowest_hp":
-            return min(enemies, key=lambda f: f.hp)
-        elif strategy == "scoring":
-            return self._score_best_target(enemies, my_cell)
-        return enemies[0] if enemies else None
-
-    def _score_best_target(self, enemies: list[Fighter], my_cell: int) -> Fighter | None:
-        """
-        Scoring function: pondera HP bajo + proximidad.
-        Mayor score = mejor objetivo.
-        """
-        if not enemies:
-            return None
-
-        max_hp = max(f.max_hp or 1 for f in enemies)
-        max_dist = max(FightState.distance(my_cell, f.cell) for f in enemies) or 1
-
-        def score(f: Fighter) -> float:
-            hp_score   = 1.0 - (f.hp / (f.max_hp or 1))   # 1.0 = casi muerto
-            dist_score = 1.0 - (FightState.distance(my_cell, f.cell) / max_dist)
-            return hp_score * 0.6 + dist_score * 0.4
-
-        return max(enemies, key=score)
-
-    def _choose_spell(self, spells: list[SpellConfig], ap: int,
-                      my_cell: int, target_cell: int) -> SpellConfig | None:
-        """
-        Elige el hechizo con mejor relación eficiencia/AP entre los casteables.
-        Prioriza mayor alcance útil y menor coste de AP (más casts por turno).
-        """
-        dist = FightState.distance(my_cell, target_cell)
-        candidates = [
-            s for s in spells
-            if s.ap_cost <= ap and s.min_range <= dist <= s.max_range
-            and (not s.line_of_sight or self._fight.has_line_of_sight(my_cell, target_cell))
-        ]
-        if not candidates:
-            return None
-        # Scoring: preferir hechizo con mayor daño implícito (rango útil amplio) y menor AP
-        return min(candidates, key=lambda s: s.ap_cost)
-
-    def _try_move_into_range(self, spells: list[SpellConfig], ap: int, mp: int,
-                              me: Fighter, enemies: list[Fighter]) -> int:
-        """
-        Usa BFS para encontrar la celda alcanzable con ≤ mp pasos que maximice
-        el número de hechizos casteables. Mueve al mejor destino y retorna
-        el número de pasos usados (0 si no se movió).
-        """
-        if mp <= 0:
-            return 0
-
-        reachable = self._fight.cells_reachable_in(me.cell, mp)
-        if not reachable:
-            return 0
-
-        casteable_spells = [s for s in spells if s.ap_cost <= ap]
-        if not casteable_spells:
-            return 0
-
-        best_cell = None
-        best_score = -1
-
-        for cell in reachable:
-            score = sum(
-                len(self._fight.enemy_in_range(cell, s.min_range, s.max_range))
-                for s in casteable_spells
-            )
-            if score > best_score:
-                best_score = score
-                best_cell = cell
-
-        if best_cell is None or best_score == 0:
-            return 0
-
-        path = self._fight.bfs_path(me.cell, best_cell)
-        if not path:
-            return 0
-
-        steps = len(path)
-        self._move_to_cell(best_cell)
-        me.cell = best_cell  # actualización local optimista
-        human_delay(config.DELAY_MOVE_MS, config.DELAY_JITTER)
-        return steps
-
-    # ------------------------------------------------------------------
-    # Acciones que inyectan paquetes
-    # ------------------------------------------------------------------
-
-    _seq = 0  # contador de secuencia de acciones GA
-
-    @classmethod
-    def _next_seq(cls) -> str:
-        cls._seq += 1
-        return str(cls._seq)
-
-    def _cast_spell(self, spell: SpellConfig, target: Fighter):
-        msg = f"Cast {spell} → fighter {target.id} en celda {target.cell}"
-        if config.DRY_RUN:
-            print(f"[CombatAI DRY_RUN] {msg}")
-            return
-        print(f"[CombatAI] {msg}")
-        # Formato C→S Dofus Retro 1.48: GAO<spell_id>;<cell_id>
-        self._injector.raw_to_server(f"GAO{spell.spell_id};{target.cell}")
-
-    def _move_to_cell(self, cell: int):
-        msg = f"Mover a celda {cell}"
-        if config.DRY_RUN:
-            print(f"[CombatAI DRY_RUN] {msg}")
-            return
-        print(f"[CombatAI] {msg}")
-        # Formato de movimiento en combate: GA<seq>\n1;<cell_path>\n
-        seq = self._next_seq()
-        self._injector.raw_to_server(f"GA{seq}\n1;{cell}\n")
-
     def _pass_turn(self):
         human_delay(config.DELAY_PASS_TURN_MS, config.DELAY_JITTER)
-        if config.DRY_RUN:
-            print("[CombatAI DRY_RUN] Pasar turno (Gt)")
-            return
         print("[CombatAI] Pasando turno.")
-        # Formato confirmado: Gt\n
-        self._injector.raw_to_server("Gt\n")
+        self._actuator.pass_turn()
