@@ -1,12 +1,19 @@
 """
 FightState — estado detallado de un combate en curso.
 
-Rastrea todos los fighters (personajes y mobs), sus posiciones, HP y equipo.
-Se actualiza con paquetes del servidor durante el combate.
+Headers de combate confirmados según retroproto / docs 2026:
+  GS   — GameStartToPlay: el servidor confirma inicio de combate
+  GM   — GameMovement: actores en mapa (también fighters durante combate)
+  GIC  — GamePlayersCoordinates: coordenadas de jugadores en combate
+  GTL  — GameTurnList: orden de turnos (lista de fighter_ids)
+  GTS  — GameTurnStart: comienza el turno de un fighter (en GameState)
+  GTF  — GameTurnFinish: fin de turno (en GameState)
+  GIE  — GameEffect: efecto aplicado (daño, buff, muerte)
+  GE   — GameEnd: fin de combate (en GameState)
+  GA   — GameActionsSendActions: acción (bidireccional)
 
-NOTA: Los formatos de payload exactos deben confirmarse en Fase 0 con el sniffer.
-Los parsers aquí son una primera aproximación basada en retroproto; ajustar
-tras capturar paquetes reales.
+Patrón de combate (retroproto):
+  GS → GIC (fighters) → GTL (orden) → GTS (turno) → GA (cast) → GIE (efectos) → Gt (fin turno)
 """
 
 from __future__ import annotations
@@ -17,8 +24,10 @@ from collections import deque
 @dataclass
 class Fighter:
     id: str
-    team: int          # 0 = equipo aliado, 1 = equipo enemigo
-    cell: int          # celda actual en el grid de combate
+    team: int          # 0 = aliado, 1 = enemigo (relativo al char del bot)
+    cell: int
+    name: str = ""
+    level: int = 0
     hp: int = 0
     max_hp: int = 0
     ap: int = 0
@@ -30,7 +39,10 @@ class Fighter:
 class FightState:
     def __init__(self):
         self._fighters: dict[str, Fighter] = {}
-        self.my_team: int = 0
+        self.my_team: int = -1
+        self._turn_order: list[str] = []
+        self.on_fight_start = None  # asignado por bot.py → state.handle_fight_start
+        self._my_fighter_id: str | None = None
 
     # ------------------------------------------------------------------
     # Acceso a fighters
@@ -40,12 +52,17 @@ class FightState:
         return list(self._fighters.values())
 
     def enemies(self) -> list[Fighter]:
+        """
+        En Dofus Retro el tercer campo de GIC no distingue equipos fiablemente
+        (todos aparecen con el mismo valor). Usamos ID negativo como criterio:
+        los mobs/NPCs siempre tienen ID negativo, los jugadores ID positivo.
+        """
         return [f for f in self._fighters.values()
-                if f.team != self.my_team and f.alive]
+                if f.id.startswith("-") and f.alive]
 
     def allies(self) -> list[Fighter]:
         return [f for f in self._fighters.values()
-                if f.team == self.my_team and f.alive]
+                if not f.id.startswith("-") and f.alive]
 
     def me(self) -> Fighter | None:
         for f in self._fighters.values():
@@ -56,24 +73,35 @@ class FightState:
     def get(self, fighter_id: str) -> Fighter | None:
         return self._fighters.get(fighter_id)
 
+    def add_fighter(self, fighter: Fighter):
+        self._fighters[fighter.id] = fighter
+
+    def reset(self):
+        self._fighters.clear()
+        self._turn_order.clear()
+        self.my_team = -1
+
     # ------------------------------------------------------------------
-    # Geometría de celdas (grid isométrico Dofus)
-    # Dofus usa un grid de 14 columnas × 20 filas = 280 celdas (0-279).
+    # Geometría (grid isométrico Dofus: 14 columnas × 20 filas = 280 celdas)
     # ------------------------------------------------------------------
 
-    MAP_WIDTH = 14
+    MAP_WIDTH  = 14
+    MAP_HEIGHT = 40  # 560 celdas / 14 columnas = 40 filas
 
     @staticmethod
     def cell_to_xy(cell: int) -> tuple[int, int]:
+        # Rejilla isométrica entrelazada de Dofus Retro (MapPoint del cliente)
+        # Filas pares:   x = col*2,     filas impares: x = col*2 + 1
         row = cell // FightState.MAP_WIDTH
         col = cell % FightState.MAP_WIDTH
-        return col, row
+        return col * 2 + (row % 2), row
 
     @staticmethod
     def distance(cell_a: int, cell_b: int) -> int:
+        # Distancia Manhattan en coordenadas isométricas, dividida entre 2
         ax, ay = FightState.cell_to_xy(cell_a)
         bx, by = FightState.cell_to_xy(cell_b)
-        return abs(ax - bx) + abs(ay - by)
+        return (abs(ax - bx) + abs(ay - by)) // 2
 
     def nearest_enemy(self, from_cell: int) -> Fighter | None:
         enemies = self.enemies()
@@ -88,15 +116,13 @@ class FightState:
         ]
 
     # ------------------------------------------------------------------
-    # Línea de visión — algoritmo de Bresenham
+    # Línea de visión (Bresenham)
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _bresenham_cells(x0: int, y0: int, x1: int, y1: int) -> list[tuple[int, int]]:
-        """Devuelve todas las celdas (col, row) que cruza la línea de (x0,y0) a (x1,y1)."""
+    def _bresenham_cells(x0, y0, x1, y1) -> list[tuple[int, int]]:
         cells = []
-        dx = abs(x1 - x0)
-        dy = abs(y1 - y0)
+        dx, dy = abs(x1 - x0), abs(y1 - y0)
         sx = 1 if x1 > x0 else -1
         sy = 1 if y1 > y0 else -1
         err = dx - dy
@@ -107,18 +133,12 @@ class FightState:
                 break
             e2 = 2 * err
             if e2 > -dy:
-                err -= dy
-                x += sx
+                err -= dy; x += sx
             if e2 < dx:
-                err += dx
-                y += sy
+                err += dx; y += sy
         return cells
 
     def has_line_of_sight(self, from_cell: int, to_cell: int) -> bool:
-        """
-        True si no hay obstáculos (celdas ocupadas por fighters) en la línea
-        recta entre from_cell y to_cell (excluye las celdas de origen y destino).
-        """
         fx, fy = self.cell_to_xy(from_cell)
         tx, ty = self.cell_to_xy(to_cell)
         occupied = {
@@ -126,57 +146,54 @@ class FightState:
             if f.alive and f.cell != from_cell and f.cell != to_cell
         }
         for x, y in self._bresenham_cells(fx, fy, tx, ty)[1:-1]:
-            cell_id = y * self.MAP_WIDTH + x
-            if cell_id in occupied:
+            if y * self.MAP_WIDTH + x in occupied:
                 return False
         return True
 
     # ------------------------------------------------------------------
-    # Pathfinding BFS en el grid de combate
+    # Pathfinding BFS
     # ------------------------------------------------------------------
 
-    MAP_HEIGHT = 20  # 280 celdas = 14 × 20
+    @staticmethod
+    def _neighbors(cell: int) -> list[int]:
+        """Las 4 celdas adyacentes en el grid isométrico de Dofus (arriba/abajo/izq/der)."""
+        row = cell // FightState.MAP_WIDTH
+        col = cell % FightState.MAP_WIDTH
+        candidates = []
+        # Arriba-derecha e izquierda (fila anterior)
+        if row > 0:
+            candidates.append(cell - FightState.MAP_WIDTH)
+            if col > 0:
+                candidates.append(cell - FightState.MAP_WIDTH - 1)
+        # Abajo-derecha e izquierda (fila siguiente)
+        if row < FightState.MAP_HEIGHT - 1:
+            candidates.append(cell + FightState.MAP_WIDTH)
+            if col < FightState.MAP_WIDTH - 1:
+                candidates.append(cell + FightState.MAP_WIDTH + 1)
+        return [c for c in candidates if 0 <= c < FightState.MAP_WIDTH * FightState.MAP_HEIGHT]
 
     def bfs_path(self, start: int, goal: int,
                  blocked_extra: set[int] | None = None) -> list[int]:
-        """
-        BFS desde start hasta goal en el grid de combate (14×20).
-        Evita celdas ocupadas por fighters (excepto el propio goal si hay target ahí).
-        blocked_extra: celdas adicionales a considerar como bloqueadas.
-
-        Devuelve la lista de cell_ids del camino (sin incluir start, incluyendo goal),
-        o lista vacía si no hay camino.
-        """
         occupied = {
             f.cell for f in self._fighters.values()
             if f.alive and f.cell != start and f.cell != goal
         }
         if blocked_extra:
             occupied |= blocked_extra
-
         visited = {start}
         queue: deque[tuple[int, list[int]]] = deque([(start, [])])
-
         while queue:
             current, path = queue.popleft()
             if current == goal:
                 return path
-
-            cx, cy = self.cell_to_xy(current)
-            # 4 vecinos (arriba, abajo, izquierda, derecha)
-            for nx, ny in ((cx, cy-1), (cx, cy+1), (cx-1, cy), (cx+1, cy)):
-                if not (0 <= nx < self.MAP_WIDTH and 0 <= ny < self.MAP_HEIGHT):
-                    continue
-                neighbor = ny * self.MAP_WIDTH + nx
+            for neighbor in self._neighbors(current):
                 if neighbor in visited or neighbor in occupied:
                     continue
                 visited.add(neighbor)
                 queue.append((neighbor, path + [neighbor]))
-
-        return []  # sin camino
+        return []
 
     def cells_reachable_in(self, start: int, mp: int) -> set[int]:
-        """Todas las celdas alcanzables desde start usando exactamente ≤ mp pasos."""
         occupied = {
             f.cell for f in self._fighters.values()
             if f.alive and f.cell != start
@@ -187,11 +204,7 @@ class FightState:
             current, steps = queue.popleft()
             if steps >= mp:
                 continue
-            cx, cy = self.cell_to_xy(current)
-            for nx, ny in ((cx, cy-1), (cx, cy+1), (cx-1, cy), (cx+1, cy)):
-                if not (0 <= nx < self.MAP_WIDTH and 0 <= ny < self.MAP_HEIGHT):
-                    continue
-                neighbor = ny * self.MAP_WIDTH + nx
+            for neighbor in self._neighbors(current):
                 if neighbor in occupied or neighbor in visited:
                     continue
                 visited[neighbor] = steps + 1
@@ -199,73 +212,148 @@ class FightState:
         return set(visited.keys()) - {start}
 
     # ------------------------------------------------------------------
-    # Handlers de paquetes (a registrar en Dispatcher)
+    # Handlers de paquetes
     # ------------------------------------------------------------------
 
-    def handle_fight_join(self, fields: list[str]):
+    def handle_gs(self, fields: list[str]):
         """
-        [CONFIRMAR en Fase 0] Paquete de inicio de combate con lista de fighters.
-        Formato aproximado (retroproto): por cada fighter hay campos
-        id|team|cell|hp|max_hp|ap|mp|...
+        GS — GameStartToPlay: confirma inicio de combate.
+        Llega antes o después de GIC según la sesión. Solo reseteamos aquí
+        si no tenemos fighters (GIC aún no llegó o fue de una sesión anterior).
+        La notificación real se hace en GTL (que siempre llega después de GIC+GS).
+        """
+        if not self._fighters:
+            self._fighters.clear()
+            self._turn_order.clear()
+            self.my_team = -1
+        print(f"[FightState] GS — {len(self._fighters)} fighters en estado")
+
+    def handle_gic(self, fields: list[str]):
+        """
+        GIC — GamePlayersCoordinates: lista de fighters al entrar en combate.
+        Formato confirmado: GIC|<id>;<cell>;<team>|<id>;<cell>;<team>|...
+        Llega ANTES de GS — aquí cargamos todos los fighters.
+        Los IDs negativos son mobs/NPCs; el char_id propio es el número largo positivo.
         """
         self._fighters.clear()
-        # Parseo tentativo — ajustar tras Fase 0
-        # Por ahora simplemente logueamos
-        print(f"[FightState] fight_join: {fields}")
+        self._turn_order.clear()
+        self.my_team = -1
 
-    def handle_fighter_stats(self, fields: list[str]):
-        """
-        [CONFIRMAR en Fase 0] Actualiza stats de un fighter.
-        Formato aproximado: fighter_id|hp|max_hp|ap|mp
-        """
-        if len(fields) < 5:
-            return
-        fid, hp, max_hp, ap, mp = fields[:5]
-        if fid in self._fighters:
-            f = self._fighters[fid]
-            f.hp = int(hp)
-            f.max_hp = int(max_hp)
-            f.ap = int(ap)
-            f.mp = int(mp)
-
-    def handle_fighter_move(self, fields: list[str]):
-        """
-        [CONFIRMAR en Fase 0] Actualiza celda de un fighter.
-        Formato aproximado: fighter_id|cell_id
-        """
-        if len(fields) < 2:
-            return
-        fid, cell = fields[0], fields[1]
-        if fid in self._fighters:
+        for entry in fields:
+            if not entry:
+                continue
+            parts = entry.split(";")
+            if len(parts) < 3:
+                continue
+            fid = parts[0]
             try:
-                self._fighters[fid].cell = int(cell)
+                cell = int(parts[1])
+                team = int(parts[2])
             except ValueError:
-                pass
+                continue
+            f = Fighter(id=fid, team=team, cell=cell)
+            # Marcar si es mi personaje
+            if self._my_fighter_id and fid == self._my_fighter_id:
+                f.is_me = True
+                self.my_team = team
+            self._fighters[fid] = f
 
-    def handle_fighter_death(self, fields: list[str]):
-        """[CONFIRMAR en Fase 0] Marca un fighter como muerto."""
-        fid = fields[0] if fields else None
-        if fid and fid in self._fighters:
-            self._fighters[fid].alive = False
+        print(f"[FightState] GIC: {len(self._fighters)} fighters cargados")
+        for f in self._fighters.values():
+            print(f"  fighter id={f.id} team={f.team} cell={f.cell} is_me={f.is_me}")
 
-    def add_fighter(self, fighter: Fighter):
-        self._fighters[fighter.id] = fighter
+    def handle_gtl(self, fields: list[str]):
+        """
+        GTL — GameTurnList: orden de turnos. Siempre llega después de GIC+GS.
+        Es el punto fiable para notificar inicio de combate.
+        """
+        print(f"[FightState] GTL raw: {fields}")
+        order = []
+        for entry in fields:
+            fid = entry.strip().lstrip("+")
+            if fid:
+                order.append(fid)
+        self._turn_order = order
+        print(f"[FightState] GTL: orden de turno = {self._turn_order}")
+        print(f"[FightState] Combate listo — {len(self._fighters)} fighters, me={self.me()}")
+        if self.on_fight_start:
+            self.on_fight_start(fields)
 
-    def reset(self):
-        self._fighters.clear()
+    def handle_gie(self, fields: list[str]):
+        """
+        GIE — GameEffect: efecto aplicado sobre un fighter (daño, buff, muerte…).
+        Formato: GIE<action_id>;<fighter_id>;<value>|...
+        Los action_ids relevantes: 100+ = daño/buff, 102 = muerte.
+        Por ahora extraemos muertes para actualizar el estado.
+        """
+        raw_payload = "|".join(fields)
+        # Cada efecto puede estar en un field o en una línea separada
+        for effect in raw_payload.split("|"):
+            parts = effect.split(";")
+            if len(parts) < 2:
+                continue
+            try:
+                action_id = int(parts[0])
+            except ValueError:
+                continue
+            fid = parts[1] if len(parts) > 1 else None
+            if not fid:
+                continue
+            if action_id == 102 and fid in self._fighters:
+                self._fighters[fid].alive = False
+                print(f"[FightState] GIE: fighter {fid} muerto")
+
+    def handle_ga(self, fields: list[str]):
+        """
+        GA — GameActionsSendActions: acción de juego (bidireccional).
+        Nos interesa el movimiento (action_id=1) para actualizar la celda del fighter.
+        Formato: GA<seq>\\n<action_id>;<fighter_id>;<path>\\n
+        """
+        raw_payload = "|".join(fields)
+        lines = [l for l in raw_payload.split("\n") if l.strip()]
+        if len(lines) < 2:
+            return
+        action_str = lines[1].strip()
+        parts = action_str.split(";")
+        if not parts:
+            return
+        try:
+            action_id = int(parts[0])
+        except ValueError:
+            return
+
+        if action_id == 1 and len(parts) >= 3:
+            fid = parts[1]
+            if fid in self._fighters:
+                try:
+                    dest_cell = int(parts[-1])
+                    self._fighters[fid].cell = dest_cell
+                    print(f"[FightState] GA mov: fighter {fid} → celda {dest_cell}")
+                except ValueError:
+                    pass
+
+    def set_my_fighter_id(self, char_id: str):
+        """
+        Llamado desde GameState.handle_ask con el char_id del personaje.
+        En Dofus Retro el fighter_id en combate coincide con el char_id del GM.
+        Lo guardamos y marcamos is_me si el fighter ya está cargado.
+        """
+        self._my_fighter_id = char_id
+        if char_id in self._fighters:
+            self._fighters[char_id].is_me = True
+            self.my_team = self._fighters[char_id].team
+            print(f"[FightState] Mi fighter identificado: id={char_id} team={self.my_team}")
 
     def register_handlers(self, dispatcher):
-        """
-        Registra handlers de FightState.
-        Los headers marcados [CONFIRMAR] deben actualizarse tras Fase 0.
-        """
-        from protocol.dispatcher import DIRECTION_SERVER
-        # Ejemplo con headers tentativas — ACTUALIZAR tras sniffer:
-        # dispatcher.on("GJK", self.handle_fight_join,    DIRECTION_SERVER)
-        # dispatcher.on("GHT", self.handle_fighter_stats, DIRECTION_SERVER)
-        # dispatcher.on("GAV", self.handle_fighter_move,  DIRECTION_SERVER)
-        # dispatcher.on("GKK", self.handle_fighter_death, DIRECTION_SERVER)
-        print("[FightState] register_handlers: headers pendientes de confirmar en Fase 0.")
+        from protocol.messages import GS, GIC, GTL, GIE, GA
+        from protocol.dispatcher import DIRECTION_SERVER, DIRECTION_ANY
+
+        dispatcher.on(GS,  self.handle_gs,  DIRECTION_SERVER)
+        dispatcher.on(GIC, self.handle_gic, DIRECTION_SERVER)
+        dispatcher.on(GTL, self.handle_gtl, DIRECTION_SERVER)
+        dispatcher.on(GIE, self.handle_gie, DIRECTION_SERVER)
+        dispatcher.on(GA,  self.handle_ga,  DIRECTION_SERVER)
+        print("[FightState] Handlers registrados: GS, GIC, GTL, GIE, GA")
 
     def __repr__(self):
         return (

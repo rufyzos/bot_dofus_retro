@@ -46,8 +46,8 @@ class CombatAI:
     # ------------------------------------------------------------------
 
     def _on_fight_start(self, fields: list[str]):
-        self._fight.reset()
-        print("[CombatAI] Combate iniciado.")
+        me = self._fight.me()
+        print(f"[CombatAI] Combate iniciado — me={me} enemies={len(self._fight.enemies())}")
 
     def _on_fight_end(self, fields: list[str]):
         print("[CombatAI] Combate terminado.")
@@ -65,8 +65,10 @@ class CombatAI:
                 self._pass_turn()
                 return
 
-            remaining_ap = me.ap
-            remaining_mp = me.mp
+            # GIC no trae AP/MP — usar los del GameState (actualizados por As) o config
+            remaining_ap = me.ap if me.ap > 0 else (self._state.ap if self._state.ap > 0 else config.DEFAULT_AP)
+            remaining_mp = me.mp if me.mp > 0 else (self._state.mp if self._state.mp > 0 else config.DEFAULT_MP)
+            print(f"[CombatAI] AP={remaining_ap} MP={remaining_mp} cell={me.cell}")
             spells: list[SpellConfig] = config.SPELLS
 
             for _ in range(10):  # máx 10 iteraciones para evitar bucle infinito
@@ -198,16 +200,21 @@ class CombatAI:
     # Acciones que inyectan paquetes
     # ------------------------------------------------------------------
 
+    _seq = 0  # contador de secuencia de acciones GA
+
+    @classmethod
+    def _next_seq(cls) -> str:
+        cls._seq += 1
+        return str(cls._seq)
+
     def _cast_spell(self, spell: SpellConfig, target: Fighter):
         msg = f"Cast {spell} → fighter {target.id} en celda {target.cell}"
         if config.DRY_RUN:
             print(f"[CombatAI DRY_RUN] {msg}")
             return
         print(f"[CombatAI] {msg}")
-        # Header de cast: [CONFIRMAR en Fase 0] — probablemente GA con acción de hechizo.
-        # Formato tentativo: GA<action_id>|<spell_id>|<target_cell>
-        # ACTUALIZAR tras capturar paquetes reales.
-        self._injector.to_server("GA", "304", spell.spell_id, str(target.cell))
+        # Formato C→S Dofus Retro 1.48: GAO<spell_id>;<cell_id>
+        self._injector.raw_to_server(f"GAO{spell.spell_id};{target.cell}")
 
     def _move_to_cell(self, cell: int):
         msg = f"Mover a celda {cell}"
@@ -215,9 +222,9 @@ class CombatAI:
             print(f"[CombatAI DRY_RUN] {msg}")
             return
         print(f"[CombatAI] {msg}")
-        # Header de movimiento en combate: [CONFIRMAR en Fase 0]
-        # Formato tentativo: GA<action_id>|<cell>
-        self._injector.to_server("GA", "1", str(cell))
+        # Formato de movimiento en combate: GA<seq>\n1;<cell_path>\n
+        seq = self._next_seq()
+        self._injector.raw_to_server(f"GA{seq}\n1;{cell}\n")
 
     def _pass_turn(self):
         human_delay(config.DELAY_PASS_TURN_MS, config.DELAY_JITTER)
@@ -225,4 +232,5 @@ class CombatAI:
             print("[CombatAI DRY_RUN] Pasar turno (Gt)")
             return
         print("[CombatAI] Pasando turno.")
-        self._injector.to_server("Gt")
+        # Formato confirmado: Gt\n
+        self._injector.raw_to_server("Gt\n")

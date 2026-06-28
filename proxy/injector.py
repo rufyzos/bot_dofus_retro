@@ -74,15 +74,22 @@ class Injector:
         return ("|".join(parts)).encode("utf-8") + DELIMITER
 
     def to_server(self, header: str, *fields: str):
-        """Encola un paquete para enviar al game server (como si viniera del cliente)."""
+        """Encola un paquete estándar (delimitado por '|') hacia el game server."""
         with self._lock:
             if not self._server_q:
                 raise RuntimeError("Injector: no hay sesión de juego activa")
             self._server_q.put(self._serialize(header, fields))
 
     def to_client(self, header: str, *fields: str):
-        """Encola un paquete para enviar al cliente (como si viniera del server)."""
+        """Encola un paquete estándar (delimitado por '|') hacia el cliente."""
         with self._lock:
             if not self._client_q:
                 raise RuntimeError("Injector: no hay sesión de juego activa")
             self._client_q.put(self._serialize(header, fields))
+
+    def raw_to_server(self, raw: str):
+        """Encola un paquete con formato literal (ya serializado, sin trailing \\x00)."""
+        with self._lock:
+            if not self._server_q:
+                raise RuntimeError("Injector: no hay sesión de juego activa")
+            self._server_q.put(raw.encode("utf-8") + DELIMITER)

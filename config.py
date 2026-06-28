@@ -10,9 +10,11 @@ from game.spell import SpellConfig
 # False → CombatAI inyecta paquetes reales (activa el bot)
 DRY_RUN = True
 
-# ── Servidores (solo cambiar si usas un server privado) ───────────────────────
-REAL_LOGIN_HOST = "co.retro.dofus.com"
-REAL_LOGIN_PORT = 5555
+# ── Servidores ────────────────────────────────────────────────────────────────
+# IP directa — evita el bucle con el hosts file que redirige el hostname.
+# Si cambia: nslookup dofusretro-co-production.ankama-games.com 8.8.8.8
+REAL_LOGIN_HOST = "52.17.187.227"
+REAL_LOGIN_PORT = 443
 
 # ── Hechizos configurados ─────────────────────────────────────────────────────
 # Añade aquí los hechizos de tu personaje.
@@ -22,15 +24,20 @@ REAL_LOGIN_PORT = 5555
 # max_range: alcance máximo
 # line_of_sight: True si requiere línea de visión
 SPELLS: list[SpellConfig] = [
-    SpellConfig(spell_id="3",  ap_cost=4, min_range=1, max_range=3),   # Ejemplo: hechizo 1
-    SpellConfig(spell_id="6",  ap_cost=3, min_range=1, max_range=4),   # Ejemplo: hechizo 2
-    SpellConfig(spell_id="13", ap_cost=2, min_range=0, max_range=1),   # Ejemplo: cuerpo a cuerpo
+    # Zarzas Múltiples nivel 5 — Sadida — confirmado con sniffer 2026-06-27
+    # GA;300 muestra spell_id=191, ap_cost=5, rango 1-4, sin línea de visión requerida
+    SpellConfig(spell_id="191", ap_cost=5, min_range=1, max_range=9, line_of_sight=False),
 ]
 
 # ── Estrategia de selección de objetivo ───────────────────────────────────────
 # "nearest"   → atacar al enemigo más cercano
 # "lowest_hp" → atacar al enemigo con menos HP
 TARGET_STRATEGY = "nearest"
+
+# ── Stats por defecto (si el servidor no los ha enviado aún vía As) ──────────
+# Ajusta según tu clase/nivel. Se usan solo como fallback hasta recibir As.
+DEFAULT_AP = 6   # Sadida base
+DEFAULT_MP = 3   # Sadida base
 
 # ── Delays anti-detección (milisegundos) ─────────────────────────────────────
 DELAY_CAST_MS      = 600    # Entre casts
