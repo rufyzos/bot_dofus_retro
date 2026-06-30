@@ -69,9 +69,11 @@ class Session:
         self.hdv.register_handlers(self.dispatcher)
 
         # Conectar callbacks internos
-        self.fight.on_fight_start  = self.state.handle_fight_start
-        self.state.on_char_id_known = self.fight.set_my_fighter_id
-        self.state.on_map_changed   = self.navigator.on_map_changed
+        self.fight.on_fight_start        = self.state.handle_fight_start
+        self.state.on_char_id_known       = self.fight.set_my_fighter_id
+        # Cuando FightState resuelve char_id (via GTL[0] o ASK), sync GameState.my_fighter_id
+        self.fight.on_fighter_id_resolved = lambda cid: setattr(self.state, "my_fighter_id", cid)
+        self.state.on_map_changed         = self.navigator.on_map_changed
 
         # Arrancar IA
         self.ai.attach()

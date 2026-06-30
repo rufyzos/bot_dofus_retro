@@ -91,34 +91,31 @@ class GameState:
 
     def handle_as(self, fields: list[str]):
         """
-        As — AccountStats: stats del personaje.
-        Formato Dofus Retro: As<hp>~<max_hp>|<ap>|<mp>|<initiative>|...
-        fields[0]="hp~maxhp", fields[1]=ap, fields[2]=mp
+        As — AccountStats: stats del personaje en el mundo (fuera de combate).
+        Formato real (sniffer 2026-06-30):
+          raw = As<nivel>|<xp_actual,xp_nivel,xp_siguiente>|<kamas>|<ap>|<iniciativa>|<energy>|<hp,maxhp>|...
+          → con header 'As' (2 chars): fields[0]=nivel, fields[3]=ap, fields[6]='hp,maxhp'
+        En combate usar GTM (que da ap/mp/hp por fighter, más fiable).
         """
         print(f"[GameState] As (stats) raw: {fields[:8]}")
         if not fields:
             return
-        # HP: primer field puede ser "hp~maxhp" o solo "hp"
-        if "~" in fields[0]:
-            parts = fields[0].split("~")
+        # AP: index 3 (nivel en [0], xp en [1], kamas en [2], ap en [3])
+        if len(fields) > 3:
+            try:
+                self.ap = int(fields[3])
+            except ValueError:
+                pass
+        # HP,MaxHP: index 6, formato "hp,maxhp"
+        if len(fields) > 6 and "," in fields[6]:
+            parts = fields[6].split(",")
             try:
                 self.hp     = int(parts[0])
                 self.max_hp = int(parts[1])
             except (ValueError, IndexError):
                 pass
-        # AP y MP en fields[1] y fields[2]
-        if len(fields) > 1:
-            try:
-                self.ap = int(fields[1])
-            except ValueError:
-                pass
-        if len(fields) > 2:
-            try:
-                self.mp = int(fields[2])
-            except ValueError:
-                pass
-        if self.ap > 0 or self.mp > 0:
-            print(f"[GameState] Stats: hp={self.hp}/{self.max_hp} ap={self.ap} mp={self.mp}")
+        if self.ap > 0:
+            print(f"[GameState] As: hp={self.hp}/{self.max_hp} ap={self.ap}")
 
     def handle_fight_start(self, fields: list[str]):
         """GS — GameStartToPlay: inicio real de combate."""

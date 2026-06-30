@@ -3,22 +3,21 @@ A* intra-mapa para navegación de mundo (fuera de combate).
 
 Diferencias respecto al BFS de fight.py:
   - Usa celdas mov=true de MapDatabase (no solo "no ocupadas por fighters").
-  - 8 direcciones con coste diferenciado HV (10) vs diagonal (14) — mismo que cliente.
   - Heurística: distancia Manhattan isométrica.
 
-Basado en Pathfinding.as de Emudofus/Dofus y ArakneUtils/arakne-map.
+En Dofus Retro el personaje solo se mueve a los 4 adyacentes (rectos
+isométricos), cada paso cuesta 1 PM — no hay diagonal de grid. Por eso el A*
+usa coste uniforme (COST_STEP) sobre neighbors_4.
 """
 
 from __future__ import annotations
 import heapq
 
 from game.world.map_geometry import (
-    MAP_WIDTH, MAP_HEIGHT, MAP_CELLS,
-    cell_to_xy, distance, neighbors_8, is_diagonal,
+    MAP_CELLS, cell_to_xy, distance, neighbors_4,
 )
 
-COST_HV   = 10   # movimiento horizontal/vertical
-COST_DIAG = 14   # movimiento diagonal (~√2 × 10)
+COST_STEP = 10   # coste de un paso (los 4 adyacentes cuestan lo mismo: 1 PM)
 # B1 — Anti-aggro: coste extra para celdas adyacentes a monstruos en el mapa.
 # Un coste alto (no infinito) hace que el bot rodee a los monstruos si hay
 # ruta alternativa, pero pueda pasar por ellos si es la única opción.
@@ -26,10 +25,10 @@ COST_AGGRO_PENALTY = 60
 
 
 def _aggro_cells(monster_cells: set[int]) -> set[int]:
-    """Todas las celdas adyacentes (8 dir) a cualquier monstruo."""
+    """Todas las celdas adyacentes a cualquier monstruo."""
     danger: set[int] = set()
     for mc in monster_cells:
-        for nb in neighbors_8(mc):
+        for nb in neighbors_4(mc):
             danger.add(nb)
     return danger
 
@@ -55,7 +54,7 @@ def astar(start: int, goal: int,
     danger  = _aggro_cells(monster_cells) if monster_cells else set()
 
     def h(cell: int) -> int:
-        return distance(cell, goal) * COST_HV
+        return distance(cell, goal) * COST_STEP
 
     open_heap: list[tuple[int, int]] = []
     heapq.heappush(open_heap, (h(start), start))
@@ -75,11 +74,11 @@ def astar(start: int, goal: int,
             path.reverse()
             return path
 
-        for neighbor in neighbors_8(current):
+        for neighbor in neighbors_4(current):
             if neighbor not in walkable or neighbor in blocked:
                 if neighbor != goal:
                     continue
-            cost = COST_DIAG if is_diagonal(current, neighbor) else COST_HV
+            cost = COST_STEP
             if neighbor in danger:
                 cost += COST_AGGRO_PENALTY
             tentative_g = g[current] + cost
@@ -106,7 +105,7 @@ def reachable_in(start: int, steps: int,
         current, cost = queue.pop(0)
         if cost >= steps:
             continue
-        for neighbor in neighbors_8(current):
+        for neighbor in neighbors_4(current):
             if neighbor in visited or neighbor not in walkable or neighbor in blocked:
                 continue
             visited[neighbor] = cost + 1

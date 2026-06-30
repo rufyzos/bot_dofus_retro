@@ -16,6 +16,7 @@ Flujo multisesión:
 
 import time
 
+import utils.console  # noqa: F401 — fuerza UTF-8 en stdout antes de cualquier print
 import config
 from proxy.tcp_proxy import DofusProxy
 from core.session import Session

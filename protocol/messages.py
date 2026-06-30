@@ -101,21 +101,63 @@ FIGHT_START = "GS"   # GS = GameStartToPlay — inicio real del combate
 
 # ── Parsers ───────────────────────────────────────────────────────────────────
 
+# Headers conocidos, ordenados por longitud descendente para hacer matching por
+# prefijo (el más largo que case gana). Esto evita el bug de partir mal headers
+# de 2 letras seguidos de dígitos: 'As9739192...' debe dar header 'As', no 'As9'.
+# Importante: en Dofus Retro el cuerpo de muchos paquetes de combate empieza por
+# dígitos pegados al header (p.ej. 'GTS2264765|...' → header 'GTS', campo '2264765').
+_KNOWN_HEADERS = sorted(
+    {
+        # Login
+        "HC", "AH", "AYK", "AX", "AxK", "Adz", "Ac", "AQW", "Ap", "Ai",
+        "AlK", "AlE", "ALK", "AS", "ASK", "ASE", "AT", "ATK", "ATE", "AV", "Af",
+        # Mundo
+        "GCK", "GDM", "BT", "fC", "GM", "GA", "GDK", "EW",
+        # Combate
+        "GS", "GJ", "GP", "Gp", "GR", "GIC", "GTL", "GTS", "GTF", "GIE",
+        "GT", "Gt", "GE", "GJK", "GPc", "GTM", "GTR", "GAS", "GAF", "GA0",
+        "As", "GdOK", "Gd", "SC", "ILF", "ILS", "BN",
+        # Oficios / inventario
+        "JS", "JX", "JO", "jO", "OAK", "OR", "OQ", "Ow",
+        # Diálogos
+        "DC", "DCK", "DCE", "DQ", "DR", "DV",
+        # HDV
+        "EHT", "EHL", "EHl", "EHP", "EHB", "EHS", "EHSK", "EHSE",
+        "ES", "ESK", "ESE", "EBK", "EBE", "EV",
+    },
+    key=len, reverse=True,
+)
+
+
 def parse(raw: str) -> tuple[str, list[str]]:
-    """Extrae (header, fields) de un paquete crudo. Header = primeros 2-3 chars."""
+    """
+    Extrae (header, fields) de un paquete crudo.
+
+    El header se identifica por prefijo contra _KNOWN_HEADERS (el más largo que
+    case). El resto del paquete son los campos, separados por '|'. Si ningún
+    header conocido casa, se usa el fallback de letras iniciales (2-3 chars).
+    """
     if len(raw) < 2:
         return raw, []
-    # Probar header de 3 chars primero (e.g. ALK, GTS, ATK…)
-    for hlen in (3, 2):
-        hdr = raw[:hlen]
-        rest = raw[hlen:]
-        if rest.startswith("|"):
-            rest = rest[1:]
-        fields = rest.split("|") if rest else []
-        # Heurística: si el header son letras/dígitos conocidos, aceptarlo
-        if hdr.isalnum() or (len(hdr) == 2 and hdr[0].isupper()):
-            return hdr, fields
-    return raw[:2], raw[3:].split("|")
+
+    hdr = None
+    for h in _KNOWN_HEADERS:
+        if raw.startswith(h):
+            hdr = h
+            break
+
+    if hdr is None:
+        # Fallback: tomar las letras iniciales (no dígitos) como header.
+        i = 0
+        while i < len(raw) and not raw[i].isdigit() and raw[i] not in "|;":
+            i += 1
+        hdr = raw[:i] if i > 0 else raw[:2]
+
+    rest = raw[len(hdr):]
+    if rest.startswith("|"):
+        rest = rest[1:]
+    fields = rest.split("|") if rest else []
+    return hdr, fields
 
 
 def header_of(raw: str) -> str:

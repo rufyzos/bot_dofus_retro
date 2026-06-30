@@ -20,6 +20,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from collections import deque
 
+from input.coords import cell_to_colrow
+
 
 @dataclass
 class Fighter:
@@ -48,6 +50,9 @@ class FightState:
         # Fase de placement (pre-combate)
         self.in_placement: bool = False
         self.placement_cells: list[int] = []  # celdas disponibles para colocarse
+
+        # Callback para notificar al GameState cuando se resuelve el fighter_id propio
+        self.on_fighter_id_resolved: object = None  # callable(char_id: str)
 
     # ------------------------------------------------------------------
     # Acceso a fighters
@@ -87,19 +92,27 @@ class FightState:
         self.my_team = -1
 
     # ------------------------------------------------------------------
-    # Geometría (grid isométrico Dofus: 14 columnas × 20 filas = 280 celdas)
+    # Geometría (grid isométrico Dofus Retro 1.48)
     # ------------------------------------------------------------------
+    # MISMO modelo que input/coords.py (validado empíricamente, RMS 2.3px):
+    # numeración base-1, filas de ancho alterno (par=14, impar=15 celdas),
+    # las filas impares se desplazan media celda a la izquierda.
+    # NO usar 'cell // 14' (modelo base-0 de ancho fijo) — es incoherente con
+    # la calibración cell→píxel y haría que la celda lógica y el click no
+    # coincidan. Ver [[project-cell-geometry]].
 
-    MAP_WIDTH  = 14
-    MAP_HEIGHT = 40  # 560 celdas / 14 columnas = 40 filas
+    TOTAL_CELLS = 560
 
     @staticmethod
     def cell_to_xy(cell: int) -> tuple[int, int]:
-        # Rejilla isométrica entrelazada de Dofus Retro (MapPoint del cliente)
-        # Filas pares:   x = col*2,     filas impares: x = col*2 + 1
-        row = cell // FightState.MAP_WIDTH
-        col = cell % FightState.MAP_WIDTH
-        return col * 2 + (row % 2), row
+        """
+        cell_id (base-1) → coordenadas isométricas (x, y) coherentes con la
+        proyección a píxel de coords.py. Los 4 vecinos de movimiento quedan a
+        distancia Manhattan 2 (→ distancia de juego 1 tras el //2).
+            x = 2*col - (1 si fila impar else 0)   ;   y = fila
+        """
+        col, fila = cell_to_colrow(cell)
+        return 2 * col - (fila % 2), fila
 
     @staticmethod
     def distance(cell_a: int, cell_b: int) -> int:
@@ -146,12 +159,16 @@ class FightState:
     def has_line_of_sight(self, from_cell: int, to_cell: int) -> bool:
         fx, fy = self.cell_to_xy(from_cell)
         tx, ty = self.cell_to_xy(to_cell)
+        # Coordenadas isométricas (x,y) de los fighters que bloquean la línea.
+        # Comparamos en espacio (x,y) — no hay inversa directa cell↔(x,y) en el
+        # modelo 14/15, así que proyectamos las celdas ocupadas a (x,y).
         occupied = {
-            f.cell for f in self._fighters.values()
+            self.cell_to_xy(f.cell)
+            for f in self._fighters.values()
             if f.alive and f.cell != from_cell and f.cell != to_cell
         }
         for x, y in self._bresenham_cells(fx, fy, tx, ty)[1:-1]:
-            if y * self.MAP_WIDTH + x in occupied:
+            if (x, y) in occupied:
                 return False
         return True
 
@@ -161,21 +178,17 @@ class FightState:
 
     @staticmethod
     def _neighbors(cell: int) -> list[int]:
-        """Las 4 celdas adyacentes en el grid isométrico de Dofus (arriba/abajo/izq/der)."""
-        row = cell // FightState.MAP_WIDTH
-        col = cell % FightState.MAP_WIDTH
-        candidates = []
-        # Arriba-derecha e izquierda (fila anterior)
-        if row > 0:
-            candidates.append(cell - FightState.MAP_WIDTH)
-            if col > 0:
-                candidates.append(cell - FightState.MAP_WIDTH - 1)
-        # Abajo-derecha e izquierda (fila siguiente)
-        if row < FightState.MAP_HEIGHT - 1:
-            candidates.append(cell + FightState.MAP_WIDTH)
-            if col < FightState.MAP_WIDTH - 1:
-                candidates.append(cell + FightState.MAP_WIDTH + 1)
-        return [c for c in candidates if 0 <= c < FightState.MAP_WIDTH * FightState.MAP_HEIGHT]
+        """
+        Las 4 celdas adyacentes de movimiento (diagonales en pantalla).
+        En el modelo base-1 14/15 los vecinos están a ±14 / ±15; se filtran
+        los que cruzarían el borde de fila comprobando que la distancia de
+        juego sea exactamente 1.
+        """
+        return [
+            n for d in (-15, -14, 14, 15)
+            if 1 <= (n := cell + d) <= FightState.TOTAL_CELLS
+            and FightState.distance(cell, n) == 1
+        ]
 
     def bfs_path(self, start: int, goal: int,
                  blocked_extra: set[int] | None = None) -> list[int]:
@@ -220,44 +233,58 @@ class FightState:
     # Handlers de paquetes
     # ------------------------------------------------------------------
 
-    def handle_gj(self, fields: list[str]):
+    def handle_gjk(self, fields: list[str]):
         """
-        GJ — GameJoin: personaje entra en el área de combate (placement).
-
-        Llega ANTES de GIC. Marca el inicio de la fase de placement.
-        Formato: GJ<fighter_id>|<team>|<cell>|<is_solo>|<challenge_id>
-        Reseteamos estado de combate anterior aquí para estar listos cuando
-        llegue GIC con las coordenadas reales.
+        GJK — GameJoinKnown: personaje entra en el área de combate (placement).
+        Formato real (sniffer): GJK<team>|0|1|0|30000|4
+        Llega ANTES de GIC. Reseteamos estado y marcamos fase de placement.
         """
         self._fighters.clear()
         self._turn_order.clear()
         self.my_team   = -1
         self.in_placement  = True
         self.placement_cells = []
-        print(f"[FightState] GJ — entrando en placement. fields={fields[:4]}")
+        print(f"[FightState] GJK — entrando en placement. fields={fields[:4]}")
 
-    def handle_gp(self, fields: list[str]):
+    def handle_gpc(self, fields: list[str]):
         """
-        GP — GamePositionStart: lista de celdas de inicio disponibles para
-        el equipo del jugador en la fase de placement.
-
-        Formato: GP<cell1>|<cell2>|...
-        El bot elige la celda óptima y envía Gp<cell_id> + GR para marcar listo.
+        GPc — GamePositionCells: celdas de inicio disponibles para placement.
+        Formato real (sniffer): GPc<team>|<celdas_codificadas_equipo0>|<celdas_codificadas_equipo1>|0
+        Las celdas vienen en encoding Dofus (pares de chars, no enteros).
+        Guardamos la string raw; si el bot tiene celda de GIC la usará como fallback.
         """
-        cells = []
-        for f in fields:
-            f = f.strip()
-            if not f:
-                continue
-            try:
-                cells.append(int(f))
-            except ValueError:
-                pass
+        print(f"[FightState] GPc — datos de placement: fields={fields[:3]}")
+        # Intentar decodificar celdas del primer equipo (fields[1])
+        cells = self._decode_placement_cells(fields[1] if len(fields) > 1 else "")
+        if not cells and len(fields) > 2:
+            cells = self._decode_placement_cells(fields[2])
         self.placement_cells = cells
-        print(f"[FightState] GP — celdas de placement disponibles: {cells[:10]}"
+        print(f"[FightState] GPc — {len(cells)} celdas decodificadas: {cells[:10]}"
               f"{'...' if len(cells) > 10 else ''}")
         if self.on_placement_ready:
             self.on_placement_ready(cells)
+
+    @staticmethod
+    def _decode_placement_cells(encoded: str) -> list[int]:
+        """
+        Decodifica el string de celdas de GPc.
+        Encoding Dofus Retro: pares de chars, cada char = índice en charset base64 Dofus.
+        charset = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-'
+        cell_id = valor_char1 * 64 + valor_char2  (base 1: +1 si 0-indexed)
+        """
+        _CHARSET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+        cells = []
+        i = 0
+        while i + 1 < len(encoded):
+            c1, c2 = encoded[i], encoded[i + 1]
+            try:
+                v1 = _CHARSET.index(c1)
+                v2 = _CHARSET.index(c2)
+                cells.append(v1 * 64 + v2)
+            except ValueError:
+                pass
+            i += 2
+        return cells
 
     def handle_gs(self, fields: list[str]):
         """
@@ -296,15 +323,8 @@ class FightState:
                 team = int(parts[2])
             except ValueError:
                 continue
-            # GIC puede traer más campos: id;cell;team;level;name;hp;max_hp;...
-            hp = max_hp = 0
-            if len(parts) >= 7:
-                try:
-                    hp     = int(parts[5])
-                    max_hp = int(parts[6])
-                except ValueError:
-                    pass
-            f = Fighter(id=fid, team=team, cell=cell, hp=hp, max_hp=max_hp)
+            # GIC formato real: id;cell;team (3 campos). HP llega en GTM.
+            f = Fighter(id=fid, team=team, cell=cell)
             # Marcar si es mi personaje
             if self._my_fighter_id and fid == self._my_fighter_id:
                 f.is_me = True
@@ -319,6 +339,8 @@ class FightState:
         """
         GTL — GameTurnList: orden de turnos. Siempre llega después de GIC+GS.
         Es el punto fiable para notificar inicio de combate.
+        fields[0] es el fighter_id del jugador principal — lo usamos como char_id
+        si aún no lo sabemos (ASK no siempre llega antes de GTL en el juego real).
         """
         print(f"[FightState] GTL raw: {fields}")
         order = []
@@ -327,10 +349,60 @@ class FightState:
             if fid:
                 order.append(fid)
         self._turn_order = order
+        # Derivar char_id del primer field (siempre el jugador propio)
+        if order and not self._my_fighter_id:
+            self.set_my_fighter_id(order[0])
+            print(f"[FightState] char_id derivado de GTL[0]: {order[0]}")
+        elif order and self._my_fighter_id != order[0]:
+            # Corregir si ASK dio un id distinto al real (puede pasar en login rápido)
+            self.set_my_fighter_id(order[0])
         print(f"[FightState] GTL: orden de turno = {self._turn_order}")
         print(f"[FightState] Combate listo — {len(self._fighters)} fighters, me={self.me()}")
         if self.on_fight_start:
             self.on_fight_start(fields)
+
+    def handle_gtm(self, fields: list[str]):
+        """
+        GTM — GameTurnMovement/Stats: stats de fighter al inicio/durante turno.
+        Formato real (sniffer): GTM<id>;0;hp;ap;mp;cell;;maxhp|<id>;...
+        Fighters muertos usan formato corto: <id>;1  (solo 2 campos, 2do=1=muerto).
+        Actualiza HP, AP, MP y celda. Sincroniza GameState si es el jugador propio.
+        """
+        for entry in fields:
+            if not entry:
+                continue
+            parts = entry.split(";")
+            fid = parts[0]
+            if fid not in self._fighters:
+                continue
+            fighter = self._fighters[fid]
+            # Formato corto: id;1 = fighter muerto
+            if len(parts) == 2 and parts[1] == "1":
+                fighter.alive = False
+                print(f"[FightState] GTM: fighter {fid} marcado muerto")
+                continue
+            if len(parts) < 6:
+                continue
+            try:
+                fighter.hp = int(parts[2])
+                fighter.ap = int(parts[3])
+                fighter.mp = int(parts[4])
+                fighter.cell = int(parts[5])
+                if len(parts) >= 8 and parts[7]:
+                    fighter.max_hp = int(parts[7])
+                fighter.alive = fighter.hp > 0
+            except (ValueError, IndexError):
+                pass
+            if fighter.is_me:
+                try:
+                    from game.state import state as _gs
+                    _gs.ap = fighter.ap
+                    _gs.mp = fighter.mp
+                    _gs.hp = fighter.hp
+                    _gs.max_hp = fighter.max_hp
+                except Exception:
+                    pass
+            print(f"[FightState] GTM: fighter {fid} hp={fighter.hp} ap={fighter.ap} mp={fighter.mp} cell={fighter.cell}")
 
     # GIE action_ids de daño confirmados (retroproto / sniffer):
     #   100 = daño HP genérico (la mayoría de ataques físicos/mágicos)
@@ -390,56 +462,80 @@ class FightState:
     def handle_ga(self, fields: list[str]):
         """
         GA — GameActionsSendActions: acción de juego (bidireccional).
-        Nos interesa el movimiento (action_id=1) para actualizar la celda del fighter.
-        Formato: GA<seq>\\n<action_id>;<fighter_id>;<path>\\n
+        Formato real (sniffer): GA|;<action_id>;<caster_id>;<target_id,valor,elemento>|...
+        fields[0] empieza con ';' (sequence_id vacío): ';action_id;caster;targets'
+        action_id 155 = daño de hechizo (targets: 'target_id,dmg,element' por coma)
+        action_id 1   = movimiento (parts[-1] = celda destino)
         """
-        raw_payload = "|".join(fields)
-        lines = [l for l in raw_payload.split("\n") if l.strip()]
-        if len(lines) < 2:
-            return
-        action_str = lines[1].strip()
-        parts = action_str.split(";")
-        if not parts:
-            return
-        try:
-            action_id = int(parts[0])
-        except ValueError:
-            return
+        for field in fields:
+            if not field or not field.startswith(";"):
+                continue
+            parts = field.split(";")
+            # parts[0]='' (seq vacío), parts[1]=action_id, parts[2]=caster, parts[3]=targets
+            if len(parts) < 2:
+                continue
+            try:
+                action_id = int(parts[1])
+            except ValueError:
+                continue
 
-        if action_id == 1 and len(parts) >= 3:
-            fid = parts[1]
-            if fid in self._fighters:
-                try:
-                    dest_cell = int(parts[-1])
-                    self._fighters[fid].cell = dest_cell
-                    print(f"[FightState] GA mov: fighter {fid} → celda {dest_cell}")
-                except ValueError:
-                    pass
+            if action_id == 1 and len(parts) >= 4:
+                # Movimiento: destino en la última parte del path
+                fid = parts[2]
+                if fid in self._fighters:
+                    try:
+                        dest_cell = int(parts[-1])
+                        self._fighters[fid].cell = dest_cell
+                        print(f"[FightState] GA mov: fighter {fid} → celda {dest_cell}")
+                    except ValueError:
+                        pass
+
+            elif action_id == 155 and len(parts) >= 4:
+                # Daño de hechizo: parts[3] = 'target_id,dmg,element' (varios targets sep. por algo)
+                targets_raw = parts[3]
+                # Múltiples targets pueden separarse por coma o por el propio split
+                # Formato: 'target_id,dmg,element' o 'target1,dmg1,elem1' (un solo target por GA)
+                target_parts = targets_raw.split(",")
+                if len(target_parts) >= 2:
+                    target_fid = target_parts[0]
+                    if target_fid in self._fighters:
+                        try:
+                            dmg = abs(int(target_parts[1]))
+                            fighter = self._fighters[target_fid]
+                            fighter.hp = max(0, fighter.hp - dmg)
+                            if fighter.hp == 0:
+                                fighter.alive = False
+                            print(f"[FightState] GA 155: {target_fid} recibe {dmg} dmg → hp={fighter.hp}")
+                        except ValueError:
+                            pass
 
     def set_my_fighter_id(self, char_id: str):
         """
-        Llamado desde GameState.handle_ask con el char_id del personaje.
+        Llamado desde GameState.handle_ask (ASK packet) o derivado de GTL[0].
         En Dofus Retro el fighter_id en combate coincide con el char_id del GM.
-        Lo guardamos y marcamos is_me si el fighter ya está cargado.
+        Notifica on_fighter_id_resolved para que GameState.my_fighter_id quede sync.
         """
         self._my_fighter_id = char_id
         if char_id in self._fighters:
             self._fighters[char_id].is_me = True
             self.my_team = self._fighters[char_id].team
             print(f"[FightState] Mi fighter identificado: id={char_id} team={self.my_team}")
+        if self.on_fighter_id_resolved:
+            self.on_fighter_id_resolved(char_id)
 
     def register_handlers(self, dispatcher):
-        from protocol.messages import GJ, GP, GS, GIC, GTL, GIE, GA
+        from protocol.messages import GS, GIC, GTL, GIE, GA
         from protocol.dispatcher import DIRECTION_SERVER
 
-        dispatcher.on(GJ,  self.handle_gj,  DIRECTION_SERVER)
-        dispatcher.on(GP,  self.handle_gp,  DIRECTION_SERVER)
-        dispatcher.on(GS,  self.handle_gs,  DIRECTION_SERVER)
-        dispatcher.on(GIC, self.handle_gic, DIRECTION_SERVER)
-        dispatcher.on(GTL, self.handle_gtl, DIRECTION_SERVER)
-        dispatcher.on(GIE, self.handle_gie, DIRECTION_SERVER)
-        dispatcher.on(GA,  self.handle_ga,  DIRECTION_SERVER)
-        print("[FightState] Handlers registrados: GJ, GP, GS, GIC, GTL, GIE, GA")
+        dispatcher.on("GJK", self.handle_gjk, DIRECTION_SERVER)
+        dispatcher.on("GPc", self.handle_gpc, DIRECTION_SERVER)
+        dispatcher.on("GTM", self.handle_gtm, DIRECTION_SERVER)
+        dispatcher.on(GS,   self.handle_gs,   DIRECTION_SERVER)
+        dispatcher.on(GIC,  self.handle_gic,  DIRECTION_SERVER)
+        dispatcher.on(GTL,  self.handle_gtl,  DIRECTION_SERVER)
+        dispatcher.on(GIE,  self.handle_gie,  DIRECTION_SERVER)
+        dispatcher.on(GA,   self.handle_ga,   DIRECTION_SERVER)
+        print("[FightState] Handlers registrados: GJK, GPc, GTM, GS, GIC, GTL, GIE, GA")
 
     def __repr__(self):
         return (
