@@ -23,7 +23,7 @@ from game.world.map_data import get_db
 from game.world.pathfinding import astar
 from game.world.world_graph import get_graph
 from input.actuator import ClickActuator
-from utils.timing import human_delay
+from utils.timing import human_delay, session_break_if_due
 
 
 class Navigator:
@@ -92,6 +92,11 @@ class Navigator:
         arrived = self._map_arrived.wait(timeout=timeout)
         if not arrived:
             print(f"[Navigator] Timeout esperando GDM tras salir a celda {exit_cell}")
+
+        # A4 — descanso mid-sesión entre cambios de mapa (anti-detección)
+        if arrived:
+            session_break_if_due()
+
         return arrived
 
     # ------------------------------------------------------------------

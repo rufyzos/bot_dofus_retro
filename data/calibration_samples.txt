@@ -1,0 +1,40 @@
+# Muestras de calibración — Mapa combate — 2560x1440 @ 100%
+# Formato: cell_id screen_x screen_y  (coordenadas Screen: de Window Spy)
+# rect detectado: left=0 top=23 width=2560 height=1377
+#
+# ── MODELO GEOMÉTRICO CONFIRMADO (derivado empíricamente, 2026-06-30) ─────────
+# Numeración base-1. Filas alternan ancho:
+#   fila 0 (par)   = 14 celdas -> cells 1..14
+#   fila 1 (impar) = 15 celdas -> cells 15..29   (cell 15 = col 0)
+#   fila 2 (par)   = 14 celdas -> cells 30..43
+#   ... patrón: par=14, impar=15, cada par de filas = 29 celdas
+#
+# cellId -> (col, fila):
+#   c = cell - 1 ; fila = 0 ; w = 14
+#   mientras c >= w:  c -= w ; fila += 1 ; w = 14 si fila par, 15 si impar
+#   col = c
+#
+# Vectores de píxel medidos directamente con Window Spy:
+#   +1 columna       -> +130 px en X
+#   +1 bloque (2 fil)-> +67 px en Y
+#   fila impar vs par-> +65 px en X, +35 px en Y
+#
+# Proyección:
+#   blk = fila // 2
+#   fila PAR:   screen_x = OX + col*130       ; screen_y = OY + blk*67
+#   fila IMPAR: screen_x = OX + col*130 + 65  ; screen_y = OY + blk*67 + 35
+#   OX≈371, OY≈16  (origen celda col=0,fila=0)
+#
+# ── Muestras FIABLES (consistentes, RMS≈5px, mismo mapa) ─────────────────────
+# Medidas con "señalar celda" (cell_id del cliente) + Window Spy (centro del rombo).
+15  436  52
+193 951  454
+463 2130 1055
+
+# ── Pendiente de confirmar ────────────────────────────────────────────────────
+# 127 1805 292  — daba col=10 pero el píxel sugiere col=11 (error +130px = 1 columna).
+#                 Re-medir centro exacto del rombo, o confirmar fórmula en fila par alta.
+#
+# ── Descartadas (otro mapa / cell_id no fiable) ──────────────────────────────
+# 450 437 1060 / 456 1215 1061 / 18 694 60 / 255 1488 594  — series MITM antiguas,
+#   inconsistentes con el modelo geométrico actual (probablemente otro mapa).

@@ -40,9 +40,15 @@ GDK  = "GDK"   # S→C  Fin de carga de actores del mapa
 EW   = "EW"    # S→C  Objetos equipados del personaje
 
 # ── Game server — combate ─────────────────────────────────────────────────────
-GS   = "GS"    # S→C  GameStartToPlay — empieza el combate
-GJ   = "GJ"    # S→C  GameJoin — unirse a combate
-GR   = "GR"    # C↔S  GameRequestReady/GameReady — marcar listo (pre-combate)
+GS   = "GS"    # S→C  GameStartToPlay — empieza el combate real (tras GR de todos)
+GJ   = "GJ"    # S→C  GameJoin — personaje entra en combate; llega ANTES de GIC
+                #        Formato: GJ<fighter_id>|<team>|<cell>|<is_solo>|<challenge_id>
+GP   = "GP"    # S→C  GamePositionStart — celdas de inicio disponibles para placement
+                #        Formato: GP<cell1>|<cell2>|...  (celdas de tu equipo disponibles)
+Gp   = "Gp"    # C→S  GameSetPlayerPosition — elegir celda de inicio en placement
+                #        Formato: Gp<cell_id>
+GR   = "GR"    # C→S  GameRequestReady — marcar listo (fin de placement)
+                #        Formato: GR  (sin cuerpo)
 GIC  = "GIC"   # S→C  GamePlayersCoordinates — coordenadas de fighters en combate
 GTL  = "GTL"   # S→C  GameTurnList — orden de turnos (lista de fighter_ids)
 GTS  = "GTS"   # S→C  GameTurnStart — comienza el turno del fighter con id dado

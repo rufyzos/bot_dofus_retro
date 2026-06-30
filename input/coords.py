@@ -2,21 +2,32 @@
 Conversión cell_id (0-559) → coordenadas de píxel en pantalla.
 
 El grid de combate de Dofus Retro es 14 columnas × 40 filas = 560 celdas (0-559).
+La numeración de celdas es DIAGONAL (Arakne/CoordinateCell):
 
-Fórmula derivada de 3 puntos medidos con Window Spy en el mapa -2,-1 (2026-06-28):
-  Celda 254 (row=18, col=2): Screen (1351, 583)
-  Celda 312 (row=22, col=4): Screen (1359, 719)
-  Celda 424 (row=30, col=4): Screen (821,  990)
-  rect.top=23, rect.left=0
+    WIDTH = 14
+    line   = cell // (WIDTH*2 - 1)     # = cell // 27
+    column = cell - line * (WIDTH*2-1)
+    offset = column % WIDTH
+    y = line - offset
+    x = (cell - (WIDTH-1) * y) // WIDTH
 
-  screen_x = OX + col*DX_COL + row*DX_ROW
-  screen_y = rect.top + OY + col*DY_COL + row*DY_ROW
+Sobre (x, y) Arakne, la rejilla isométrica se expresa con
+tres identidades exactas (verificadas para las 560 celdas):
 
-  DX_COL = 138.5    DY_COL = 0.25
-  DX_ROW = -67.25   DY_ROW = 33.875
+    row    = x + y                      # fila visual 0..39
+    parity = row % 2                    # 1 = fila impar (desplazada HW a la derecha)
+    col    = (x - y - parity) // 2     # posición dentro de la fila
 
-Nota: DX_ROW es negativo — al bajar de fila el mapa se desplaza a la izquierda
-(proyección isométrica del rombo Dofus).
+Proyección canónica (derivada de MapRenderer-DR/main.js + skew observado):
+    screen_x = OX + col*CELL_W + parity*CELL_HW + row*CELL_RW
+    screen_y = OY + row*CELL_HH + col*CELL_CY
+
+donde CELL_RW es el skew horizontal por fila (~-8px) y CELL_CY es el descenso
+en Y por columna (~0.3px), ambos de la geometría isométrica real del cliente.
+Ajuste exacto sobre 4 muestras MITM — RMS<0.5px.
+
+Para recalibrar: python tools/calibrate.py --fit
+Para verificar:  python tools/calibrate.py --verify
 """
 
 from __future__ import annotations
@@ -24,11 +35,24 @@ from input.window import WindowRect
 
 MAP_WIDTH = 14
 
-# Pendientes isométricas calibradas (px por unidad de col/row)
-DX_PER_COL: float = 138.5    # X avanza ~138.5px por columna
-DY_PER_COL: float = 0.25     # Y baja levemente por columna
-DX_PER_ROW: float = -67.25   # X retrocede ~67.25px por fila (inclinación isométrica)
-DY_PER_ROW: float = 33.875   # Y baja ~33.9px por fila
+# Constantes isométricas canónicas calibradas (px, 2560×1440 @ 100%)
+# Fit exacto sobre muestras MITM (450,456,18,255). rect.left=0, rect.top=23.
+# Fuente del modelo: MapRenderer-DR + análisis de skew del grid real.
+CELL_W:  float = 129.667   # ancho de columna en px
+CELL_HW: float = 106.802   # offset fila impar (absorbe el skew inicial de parity)
+CELL_HH: float =  31.235   # altura de media fila en px
+CELL_RW: float =  -8.031   # skew horizontal por fila (el grid se inclina ~-8px/fila a la izq.)
+CELL_CY: float =   0.305   # descenso en Y por columna (componente Y de la inclinación)
+
+
+def cell_to_arakne(cell: int) -> tuple[int, int]:
+    """Convierte cell_id al sistema de coordenadas diagonal de Dofus (Arakne)."""
+    line = cell // (MAP_WIDTH * 2 - 1)
+    column = cell - line * (MAP_WIDTH * 2 - 1)
+    offset = column % MAP_WIDTH
+    y = line - offset
+    x = (cell - (MAP_WIDTH - 1) * y) // MAP_WIDTH
+    return x, y
 
 
 def cell_to_screen(
@@ -43,16 +67,17 @@ def cell_to_screen(
     """
     Convierte un cell_id de Dofus al píxel central de esa celda en pantalla.
 
-    origin_x: componente X del origen (screen_x cuando row=0, col=0).
-    origin_y: componente Y del origen en coordenadas cliente (screen_y - rect.top cuando row=0, col=0).
-    scale_x/scale_y: factores adicionales si el cliente está a otro zoom (normalmente 1.0).
+    origin_x/origin_y: offset de origen (desde config.MAP_ORIGIN_X/Y).
+    scale_x/scale_y: factores adicionales si el cliente está a otro zoom.
     """
     sx = scale_x if scale_x is not None else scale
     sy = scale_y if scale_y is not None else scale
 
-    row = cell // MAP_WIDTH
-    col = cell % MAP_WIDTH
+    x, y = cell_to_arakne(cell)
+    row    = x + y
+    parity = row % 2
+    col    = (x - y - parity) // 2
 
-    screen_x = int((origin_x + col * DX_PER_COL + row * DX_PER_ROW) * sx)
-    screen_y = int(rect.top + (origin_y + col * DY_PER_COL + row * DY_PER_ROW) * sy)
+    screen_x = int(rect.left + (origin_x + col * CELL_W + parity * CELL_HW + row * CELL_RW) * sx)
+    screen_y = int(rect.top  + (origin_y + row * CELL_HH + col * CELL_CY) * sy)
     return screen_x, screen_y

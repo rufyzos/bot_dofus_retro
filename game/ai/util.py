@@ -52,3 +52,43 @@ def best_cast_spell(spells: list[SpellConfig]) -> SpellConfig | None:
     if not spells:
         return None
     return min(spells, key=lambda s: s.ap_cost)
+
+
+def best_aoe_cell(spell: SpellConfig, my_cell: int,
+                  enemies: list[Fighter], fight: FightState) -> tuple[int, int] | None:
+    """
+    Encuentra la celda objetivo que maximiza enemigos dentro del radio AoE del hechizo.
+
+    Prueba cada celda enemiga (y sus vecinos dentro del radio) como epicentro AoE.
+    Devuelve (best_cell, enemies_hit) o None si ninguna celda es casteable.
+    """
+    from game.fight import FightState as FS
+
+    candidate_cells: set[int] = set()
+    for e in enemies:
+        candidate_cells.add(e.cell)
+        # Vecinos dentro del radio AoE como posibles epicentros
+        for nb in fight._neighbors(e.cell):
+            candidate_cells.add(nb)
+
+    best_cell: int | None = None
+    best_count: int = 0
+
+    for cell in candidate_cells:
+        dist = FS.distance(my_cell, cell)
+        if not (spell.min_range <= dist <= spell.max_range):
+            continue
+        if spell.line_of_sight and not fight.has_line_of_sight(my_cell, cell):
+            continue
+        # Contar enemigos dentro del radio AoE del epicentro
+        hit = sum(
+            1 for e in enemies
+            if FS.distance(cell, e.cell) <= spell.aoe_radius
+        )
+        if hit > best_count:
+            best_count = hit
+            best_cell = cell
+
+    if best_cell is None:
+        return None
+    return best_cell, best_count

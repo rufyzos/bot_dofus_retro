@@ -41,8 +41,13 @@ class FightState:
         self._fighters: dict[str, Fighter] = {}
         self.my_team: int = -1
         self._turn_order: list[str] = []
-        self.on_fight_start = None  # asignado por bot.py → state.handle_fight_start
+        self.on_fight_start   = None  # asignado por bot.py → state.handle_fight_start
+        self.on_placement_ready = None  # callback(available_cells) al recibir GP
         self._my_fighter_id: str | None = None
+
+        # Fase de placement (pre-combate)
+        self.in_placement: bool = False
+        self.placement_cells: list[int] = []  # celdas disponibles para colocarse
 
     # ------------------------------------------------------------------
     # Acceso a fighters
@@ -215,6 +220,45 @@ class FightState:
     # Handlers de paquetes
     # ------------------------------------------------------------------
 
+    def handle_gj(self, fields: list[str]):
+        """
+        GJ — GameJoin: personaje entra en el área de combate (placement).
+
+        Llega ANTES de GIC. Marca el inicio de la fase de placement.
+        Formato: GJ<fighter_id>|<team>|<cell>|<is_solo>|<challenge_id>
+        Reseteamos estado de combate anterior aquí para estar listos cuando
+        llegue GIC con las coordenadas reales.
+        """
+        self._fighters.clear()
+        self._turn_order.clear()
+        self.my_team   = -1
+        self.in_placement  = True
+        self.placement_cells = []
+        print(f"[FightState] GJ — entrando en placement. fields={fields[:4]}")
+
+    def handle_gp(self, fields: list[str]):
+        """
+        GP — GamePositionStart: lista de celdas de inicio disponibles para
+        el equipo del jugador en la fase de placement.
+
+        Formato: GP<cell1>|<cell2>|...
+        El bot elige la celda óptima y envía Gp<cell_id> + GR para marcar listo.
+        """
+        cells = []
+        for f in fields:
+            f = f.strip()
+            if not f:
+                continue
+            try:
+                cells.append(int(f))
+            except ValueError:
+                pass
+        self.placement_cells = cells
+        print(f"[FightState] GP — celdas de placement disponibles: {cells[:10]}"
+              f"{'...' if len(cells) > 10 else ''}")
+        if self.on_placement_ready:
+            self.on_placement_ready(cells)
+
     def handle_gs(self, fields: list[str]):
         """
         GS — GameStartToPlay: confirma inicio de combate.
@@ -222,6 +266,7 @@ class FightState:
         si no tenemos fighters (GIC aún no llegó o fue de una sesión anterior).
         La notificación real se hace en GTL (que siempre llega después de GIC+GS).
         """
+        self.in_placement = False
         if not self._fighters:
             self._fighters.clear()
             self._turn_order.clear()
@@ -251,7 +296,15 @@ class FightState:
                 team = int(parts[2])
             except ValueError:
                 continue
-            f = Fighter(id=fid, team=team, cell=cell)
+            # GIC puede traer más campos: id;cell;team;level;name;hp;max_hp;...
+            hp = max_hp = 0
+            if len(parts) >= 7:
+                try:
+                    hp     = int(parts[5])
+                    max_hp = int(parts[6])
+                except ValueError:
+                    pass
+            f = Fighter(id=fid, team=team, cell=cell, hp=hp, max_hp=max_hp)
             # Marcar si es mi personaje
             if self._my_fighter_id and fid == self._my_fighter_id:
                 f.is_me = True
@@ -279,15 +332,26 @@ class FightState:
         if self.on_fight_start:
             self.on_fight_start(fields)
 
+    # GIE action_ids de daño confirmados (retroproto / sniffer):
+    #   100 = daño HP genérico (la mayoría de ataques físicos/mágicos)
+    #   101 = daño en escudo/armadura (no resta HP real)
+    #   102 = muerte del fighter
+    #   103 = curación (HP restaurado — valor positivo)
+    #   104 = daño en PM (pérdida de PM)
+    #   105 = daño en PA (pérdida de PA)
+    # Si el action_id no está aquí lo ignoramos (buff visual, etc.)
+    _GIE_DAMAGE_IDS  = {100}     # resta HP
+    _GIE_HEAL_IDS    = {103}     # suma HP
+    _GIE_DEATH_ID    = 102
+
     def handle_gie(self, fields: list[str]):
         """
-        GIE — GameEffect: efecto aplicado sobre un fighter (daño, buff, muerte…).
-        Formato: GIE<action_id>;<fighter_id>;<value>|...
-        Los action_ids relevantes: 100+ = daño/buff, 102 = muerte.
-        Por ahora extraemos muertes para actualizar el estado.
+        GIE — GameEffect: efecto sobre un fighter (daño, curación, muerte…).
+        Formato por efecto: <action_id>;<fighter_id>;<value>[;<extra>...]
+        Varios efectos vienen separados por '|' dentro del mismo paquete.
+        Actualiza HP y alive en tiempo real para que lowest_hp_enemy sea correcto.
         """
         raw_payload = "|".join(fields)
-        # Cada efecto puede estar en un field o en una línea separada
         for effect in raw_payload.split("|"):
             parts = effect.split(";")
             if len(parts) < 2:
@@ -297,11 +361,31 @@ class FightState:
             except ValueError:
                 continue
             fid = parts[1] if len(parts) > 1 else None
-            if not fid:
+            if not fid or fid not in self._fighters:
                 continue
-            if action_id == 102 and fid in self._fighters:
-                self._fighters[fid].alive = False
+            fighter = self._fighters[fid]
+
+            if action_id == self._GIE_DEATH_ID:
+                fighter.alive = False
                 print(f"[FightState] GIE: fighter {fid} muerto")
+
+            elif action_id in self._GIE_DAMAGE_IDS and len(parts) >= 3:
+                try:
+                    dmg = abs(int(parts[2]))
+                    fighter.hp = max(0, fighter.hp - dmg)
+                    print(f"[FightState] GIE: fighter {fid} recibe {dmg} daño → hp={fighter.hp}")
+                    if fighter.hp == 0:
+                        fighter.alive = False
+                except ValueError:
+                    pass
+
+            elif action_id in self._GIE_HEAL_IDS and len(parts) >= 3:
+                try:
+                    heal = abs(int(parts[2]))
+                    fighter.hp = min(fighter.max_hp or fighter.hp + heal, fighter.hp + heal)
+                    print(f"[FightState] GIE: fighter {fid} curado {heal} → hp={fighter.hp}")
+                except ValueError:
+                    pass
 
     def handle_ga(self, fields: list[str]):
         """
@@ -345,15 +429,17 @@ class FightState:
             print(f"[FightState] Mi fighter identificado: id={char_id} team={self.my_team}")
 
     def register_handlers(self, dispatcher):
-        from protocol.messages import GS, GIC, GTL, GIE, GA
-        from protocol.dispatcher import DIRECTION_SERVER, DIRECTION_ANY
+        from protocol.messages import GJ, GP, GS, GIC, GTL, GIE, GA
+        from protocol.dispatcher import DIRECTION_SERVER
 
+        dispatcher.on(GJ,  self.handle_gj,  DIRECTION_SERVER)
+        dispatcher.on(GP,  self.handle_gp,  DIRECTION_SERVER)
         dispatcher.on(GS,  self.handle_gs,  DIRECTION_SERVER)
         dispatcher.on(GIC, self.handle_gic, DIRECTION_SERVER)
         dispatcher.on(GTL, self.handle_gtl, DIRECTION_SERVER)
         dispatcher.on(GIE, self.handle_gie, DIRECTION_SERVER)
         dispatcher.on(GA,  self.handle_ga,  DIRECTION_SERVER)
-        print("[FightState] Handlers registrados: GS, GIC, GTL, GIE, GA")
+        print("[FightState] Handlers registrados: GJ, GP, GS, GIC, GTL, GIE, GA")
 
     def __repr__(self):
         return (

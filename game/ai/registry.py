@@ -14,12 +14,14 @@ from game.ai.ranged import RangedArchetype
 from game.ai.melee import MeleeArchetype
 from game.ai.support import SupportArchetype
 from game.ai.summoner import SummonerArchetype
+from game.ai.sadida import SadidaArchetype
 
 _REGISTRY: dict[str, type[Archetype]] = {
     "ranged":   RangedArchetype,
     "melee":    MeleeArchetype,
     "support":  SupportArchetype,
     "summoner": SummonerArchetype,
+    "sadida":   SadidaArchetype,
 }
 
 

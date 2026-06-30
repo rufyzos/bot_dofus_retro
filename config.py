@@ -48,20 +48,26 @@ DEFAULT_MP = 3   # Sadida base
 # Título real: "Rufyzos - Dofus Retro v1.48.16"
 WINDOW_TITLE_SUBSTR = "Dofus Retro"
 
-# Origen del área de mapa dentro del área cliente de la ventana (px, sin escalar).
-# Estos valores son para la resolución por defecto del cliente (1276×876).
-# Calibrar con: python tools/calibrate.py <cell_id>
-# Punto (0,0) del mapa isométrico relativo a la esquina superior-izquierda
-# del área cliente de la ventana.
-MAP_ORIGIN_X: float = 2284.5  # OX calibrado: 3 puntos mapa -2,-1 (2026-06-28)
-MAP_ORIGIN_Y: float = -50.25  # OY calibrado: client_y origen fórmula
-MAP_SCALE_X:  float = 1.0     # escala adicional (pendientes DX/DY absorben el zoom real)
+# Origen del mapa isométrico en coordenadas cliente (px).
+# Calibrado para 2560x1440 @ 100% escala de pantalla.
+# Recalibrar con: python tools/calibrate.py --fit  (>=5 celdas, minimos cuadrados)
+# Verificar:      python tools/calibrate.py --verify
+# Cursor visual:  python tools/calibrate.py <cell_id> [...]
+MAP_ORIGIN_X: float = 76.562  # client_x celda 0 (rect.left=0), modelo isométrico canónico
+MAP_ORIGIN_Y: float =  4.727  # client_y celda 0 (rect.top=23),  modelo isométrico canónico
+MAP_SCALE_X:  float = 1.0     # escala extra (constantes en coords.py absorben el zoom)
 MAP_SCALE_Y:  float = 1.0
 MAP_SCALE:    float = 1.0
 
 # Tecla para pasar turno (Enter o Tab en Dofus Retro por defecto).
 # Confirmar en configuración de atajos del cliente.
 PASS_TURN_KEY = "enter"
+
+# Tecla del botón "Listo" en la fase de placement (mismo que pasar turno en Dofus Retro).
+READY_KEY = "enter"
+
+# ms entre elegir celda de placement y hacer click / marcar listo
+DELAY_PLACEMENT_MS = 700
 
 # ms entre pulsar la tecla del slot y hacer click en la celda
 DELAY_SPELL_SELECT_MS = 250
@@ -106,3 +112,14 @@ DELAY_CAST_MS      = 600    # Entre casts
 DELAY_MOVE_MS      = 400    # Movimiento en combate
 DELAY_PASS_TURN_MS = 800    # Antes de pasar turno
 DELAY_JITTER       = 0.30   # ± 30% de variación aleatoria
+
+# ── Watchdog de turno ─────────────────────────────────────────────────────────
+# Segundos máximos por turno antes de forzar pass_turn (Dofus timeout ≈ 30s).
+TURN_TIMEOUT_S = 25
+
+# ── Descansos mid-sesión (anti-detección) ─────────────────────────────────────
+# Intervalo aleatorio entre descansos (minutos). Paper arXiv 2508.20578:
+# los humanos paran ~cada 20-40 min; los bots nunca — señal primaria.
+BOT_BREAK_INTERVAL_MIN = (18, 42)
+# Duración del descanso (segundos): de 1.5 min a 8 min.
+BOT_BREAK_DURATION_S   = (90, 480)

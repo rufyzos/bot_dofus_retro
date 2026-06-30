@@ -19,21 +19,40 @@ from game.world.map_geometry import (
 
 COST_HV   = 10   # movimiento horizontal/vertical
 COST_DIAG = 14   # movimiento diagonal (~√2 × 10)
+# B1 — Anti-aggro: coste extra para celdas adyacentes a monstruos en el mapa.
+# Un coste alto (no infinito) hace que el bot rodee a los monstruos si hay
+# ruta alternativa, pero pueda pasar por ellos si es la única opción.
+COST_AGGRO_PENALTY = 60
+
+
+def _aggro_cells(monster_cells: set[int]) -> set[int]:
+    """Todas las celdas adyacentes (8 dir) a cualquier monstruo."""
+    danger: set[int] = set()
+    for mc in monster_cells:
+        for nb in neighbors_8(mc):
+            danger.add(nb)
+    return danger
 
 
 def astar(start: int, goal: int,
           walkable: set[int],
-          blocked_extra: set[int] | None = None) -> list[int]:
+          blocked_extra: set[int] | None = None,
+          monster_cells: set[int] | None = None) -> list[int]:
     """
     A* desde start hasta goal sobre el conjunto walkable de cellIds.
 
     blocked_extra: celdas adicionales a bloquear (entidades en el mapa).
+    monster_cells: B1 — celdas donde hay monstruos no combativos en el mapa.
+      Las celdas adyacentes a estos monstruos reciben una penalización de coste
+      (COST_AGGRO_PENALTY) para que el bot prefiera caminos alejados de la
+      zona de aggro, sin bloquearlos por completo.
     Devuelve la lista de celdas [start, ..., goal] o [] si no hay ruta.
     """
     if start == goal:
         return [start]
 
     blocked = set() if blocked_extra is None else blocked_extra
+    danger  = _aggro_cells(monster_cells) if monster_cells else set()
 
     def h(cell: int) -> int:
         return distance(cell, goal) * COST_HV
@@ -61,6 +80,8 @@ def astar(start: int, goal: int,
                 if neighbor != goal:
                     continue
             cost = COST_DIAG if is_diagonal(current, neighbor) else COST_HV
+            if neighbor in danger:
+                cost += COST_AGGRO_PENALTY
             tentative_g = g[current] + cost
             if tentative_g < g.get(neighbor, 10**9):
                 came_from[neighbor] = current
