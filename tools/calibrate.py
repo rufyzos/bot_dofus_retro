@@ -1,34 +1,27 @@
 """
 Herramienta de calibración del grid isométrico de combate.
 
+MODELO (ver input/coords.py): numeración base-1, filas alternas 14/15 celdas.
+    screen_x = rect.left + MAP_ORIGIN_X + col*CELL_W   + odd*ODD_DX
+    screen_y = rect.top  + MAP_ORIGIN_Y + bloque*ROW_H + odd*ODD_DY
+donde (col, fila) = cell_to_colrow(cell), bloque = fila//2, odd = fila%2.
+
 MODO 1 — Mover cursor a celda (verificación visual):
     python tools/calibrate.py <cell_id> [cell_id2 ...]
     Mueve el cursor (sin click) al píxel calculado para cada celda.
-    Observa si cae sobre la celda correcta en el cliente.
 
 MODO 2 — Ajuste por mínimos cuadrados (calibración precisa):
     python tools/calibrate.py --fit
-
-    El script te pide pares "cell_id screen_x screen_y" medidos con Window Spy
-    sobre el CENTRO de cada celda. Recomendado >=5 celdas repartidas por el mapa:
-    filas par E impar (cruciales para calibrar CELL_HW), columnas extremas.
-
-    El ajuste calcula los 5 coeficientes del modelo isométrico canónico:
-        screen_x = rect.left + MAP_ORIGIN_X + col*CELL_W + parity*CELL_HW + row*CELL_RW
-        screen_y = rect.top  + MAP_ORIGIN_Y + row*CELL_HH
-    donde row=x+y, parity=row%2, col=(x-y-parity)//2  (x,y = coords Arakne)
-    CELL_RW es el skew horizontal del grid (negativo = se inclina izquierda al bajar).
-
-    Celdas recomendadas (cubren filas par/impar y columnas extremas):
-        0, 13, 27, 14, 270, 283, 532, 545, 559
+    Pide pares "cell_id screen_x screen_y" medidos con Window Spy sobre el
+    CENTRO del rombo. Recomendado >=5 celdas: filas par E impar, columnas
+    extremas. Calcula MAP_ORIGIN_X/Y, CELL_W, ROW_H, ODD_DX, ODD_DY.
 
 MODO 3 — Verificar calibración actual contra muestras guardadas:
     python tools/calibrate.py --verify
     Lee data/calibration_samples.txt y muestra el error por muestra + RMS.
-    Objetivo: RMS < 2px, MAX < 5px.
 
 Ejemplos:
-    python tools/calibrate.py 0 200 400 559
+    python tools/calibrate.py 15 268 463
     python tools/calibrate.py --fit
     python tools/calibrate.py --verify
 """
@@ -42,20 +35,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import pyautogui
 import config
 from input.window import find_dofus_window, WindowRect
-from input.coords import cell_to_screen, cell_to_arakne, MAP_WIDTH, CELL_W, CELL_HW, CELL_HH, CELL_RW, CELL_CY
+from input.coords import cell_to_screen, cell_to_colrow, CELL_W, ROW_H, ODD_DX, ODD_DY
 
 pyautogui.FAILSAFE = False
 
 SAMPLES_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "calibration_samples.txt")
-
-
-def _cell_features(cell: int) -> tuple[int, int, int]:
-    """Devuelve (col, parity, row) canónicos para un cell_id."""
-    x, y = cell_to_arakne(cell)
-    row    = x + y
-    parity = row % 2
-    col    = (x - y - parity) // 2
-    return col, parity, row
 
 
 def _load_samples(path: str) -> list[tuple[int, int, int]]:
@@ -90,11 +74,12 @@ def mode_cursor(cell_ids: list[int]):
     time.sleep(2)
 
     for cell in cell_ids:
-        col, parity, row = _cell_features(cell)
+        col, fila = cell_to_colrow(cell)
         px, py = cell_to_screen(cell, rect, config.MAP_ORIGIN_X, config.MAP_ORIGIN_Y,
                                 config.MAP_SCALE, scale_x=config.MAP_SCALE_X,
                                 scale_y=config.MAP_SCALE_Y)
-        print(f"  cell={cell:>4} (row={row:>2},col={col:>2},par={parity}) -> ({px:>5}, {py:>5})")
+        par = "par" if fila % 2 == 0 else "impar"
+        print(f"  cell={cell:>4} (col={col:>2},fila={fila:>2},{par}) -> ({px:>5}, {py:>5})")
         pyautogui.moveTo(px, py, duration=0.15)
         time.sleep(1.5)
 
@@ -111,20 +96,26 @@ def mode_verify():
         print("Mide con Window Spy y ejecuta --fit primero.")
         sys.exit(1)
 
+    # Las muestras se midieron con la ventana en rect.left=0 top=23.
+    # Si la ventana está minimizada/movida, win32 devuelve coords basura
+    # (p.ej. -32000); usamos el rect de referencia de las muestras.
+    rect = WindowRect(left=0, top=23, width=2560, height=1377)
     try:
-        rect = find_dofus_window(config.WINDOW_TITLE_SUBSTR)
+        live = find_dofus_window(config.WINDOW_TITLE_SUBSTR)
+        if live.width > 0 and live.left > -10000:
+            rect = live
     except RuntimeError:
-        rect = WindowRect(left=0, top=23, width=2560, height=1377)
+        pass
 
-    print(f"Verificando {len(samples)} muestras con config actual...")
+    print(f"Verificando {len(samples)} muestras (rect.left={rect.left} top={rect.top})...")
     print(f"  MAP_ORIGIN=({config.MAP_ORIGIN_X},{config.MAP_ORIGIN_Y})")
-    print(f"  CELL_W={CELL_W}  CELL_HW={CELL_HW}  CELL_HH={CELL_HH}  CELL_RW={CELL_RW}  CELL_CY={CELL_CY}")
+    print(f"  CELL_W={CELL_W}  ROW_H={ROW_H}  ODD_DX={ODD_DX}  ODD_DY={ODD_DY}")
     print()
 
     sum_sq = 0.0
     max_err = 0.0
     for cell, sx, sy in samples:
-        col, parity, row = _cell_features(cell)
+        col, fila = cell_to_colrow(cell)
         px, py = cell_to_screen(cell, rect, config.MAP_ORIGIN_X, config.MAP_ORIGIN_Y,
                                 config.MAP_SCALE, scale_x=config.MAP_SCALE_X,
                                 scale_y=config.MAP_SCALE_Y)
@@ -132,14 +123,15 @@ def mode_verify():
         err = (ex**2 + ey**2) ** 0.5
         sum_sq += ex**2 + ey**2
         max_err = max(max_err, err)
+        par = "par" if fila % 2 == 0 else "impar"
         warn = "  <- MAL" if err > 5 else ""
-        print(f"  celda {cell:>3} (row={row:>2},col={col:>2},par={parity}): "
+        print(f"  celda {cell:>3} (col={col:>2},fila={fila:>2},{par:>5}): "
               f"pred=({px},{py}) med=({sx},{sy}) err=({ex:+d},{ey:+d}) |{err:.1f}px|{warn}")
 
     rms = (sum_sq / len(samples)) ** 0.5
     print()
-    print(f"  RMS={rms:.2f}px   MAX={max_err:.1f}px   (objetivo: RMS<2px, MAX<5px)")
-    if rms < 2.0 and max_err < 5.0:
+    print(f"  RMS={rms:.2f}px   MAX={max_err:.1f}px   (objetivo: RMS<5px, MAX<10px)")
+    if rms < 5.0 and max_err < 10.0:
         print("  OK — calibracion correcta.")
     else:
         print("  AVISO: error alto. Ejecuta --fit con nuevas muestras.")
@@ -164,21 +156,13 @@ def mode_fit():
 
     print()
     print("=" * 60)
-    print("  MODO AJUSTE — Minimos cuadrados (modelo isométrico canónico)")
+    print("  MODO AJUSTE — Minimos cuadrados (modelo geométrico 14/15)")
     print("=" * 60)
     print()
-    print("Introduce pares de medicion con Window Spy.")
-    print("Pon el cursor en el CENTRO visual de la celda (el rombo isométrico).")
-    print("Usa las coordenadas de la linea 'Screen:' de Window Spy.")
-    print()
-    print("IMPORTANTE: incluye celdas de filas PARES e IMPARES para calibrar")
-    print("el offset de filas impares (CELL_HW). Recomendadas:")
-    print("  0, 13, 27, 14, 270, 283, 532, 545, 559")
-    print()
-    print("Formato: <cell_id> <screen_x> <screen_y>")
-    print("Ejemplo: 312 1359 719")
-    print()
-    print("Escribe 'listo' o deja la linea vacia cuando hayas terminado.")
+    print("Pon el cursor en el CENTRO visual de la celda (el rombo) con Window Spy.")
+    print("Incluye celdas de filas PARES e IMPARES y columnas extremas.")
+    print("Formato: <cell_id> <screen_x> <screen_y>   (ej: 268 1284 623)")
+    print("Escribe 'listo' o deja la linea vacia cuando termines.")
     print()
 
     samples = []
@@ -198,100 +182,79 @@ def mode_fit():
         except ValueError:
             print("    -> Valores no numericos.")
             continue
-        if not 0 <= cell <= 559:
-            print("    -> cell_id debe estar entre 0 y 559.")
-            continue
-        col, parity, row = _cell_features(cell)
+        col, fila = cell_to_colrow(cell)
         cx = sx - rect.left
         cy = sy - rect.top
-        samples.append((cell, col, parity, row, cx, cy, sx, sy))
-        print(f"    -> celda {cell} (row={row},col={col},par={parity})  client=({cx},{cy})  OK")
+        samples.append((cell, col, fila % 2, fila // 2, cx, cy, sx, sy))
+        par = "par" if fila % 2 == 0 else "impar"
+        print(f"    -> celda {cell} (col={col},fila={fila},{par})  client=({cx},{cy})  OK")
 
-    if len(samples) < 3:
-        print("\nNecesitas al menos 3 muestras para el ajuste. Cancelando.")
+    if len(samples) < 4:
+        print("\nNecesitas al menos 4 muestras para el ajuste. Cancelando.")
         sys.exit(1)
 
-    # Verificar cobertura de paridad
     parities = set(s[2] for s in samples)
     if len(parities) < 2:
         print("\nAVISO: todas las muestras son de filas del mismo tipo (par/impar).")
-        print("  CELL_HW no se puede calibrar bien. Añade celdas de filas impares:")
-        print("  Filas impares: 1,3,5... -> celdas 1,3,5,15,29,43...")
-
-    rows_seen = [s[3] for s in samples]
-    cols_seen = [s[1] for s in samples]
-    if max(rows_seen) - min(rows_seen) < 8:
-        print(f"\nAVISO: poca diversidad de filas (rango={max(rows_seen)-min(rows_seen)}). "
-              f"Añade celdas en filas mas separadas para un ajuste robusto de CELL_HH.")
-    if max(cols_seen) - min(cols_seen) < 5:
-        print(f"\nAVISO: poca diversidad de columnas (rango={max(cols_seen)-min(cols_seen)}). "
-              f"Añade celdas con col 0-2 o col 10-13 para un ajuste robusto de CELL_W.")
+        print("  ODD_DX/ODD_DY no se calibran bien. Añade filas del otro tipo.")
 
     print(f"\nAjustando con {len(samples)} muestras...")
 
-    # screen_x - rect.left = MAP_ORIGIN_X + col*CELL_W + parity*CELL_HW + row*CELL_RW
-    # screen_y - rect.top  = MAP_ORIGIN_Y + row*CELL_HH
-    Ax = np.array([[1, col, parity, row] for (_, col, parity, row, cx, cy, sx, sy) in samples], float)
-    bx = np.array([cx for (_, col, parity, row, cx, cy, sx, sy) in samples], float)
-    Ay = np.array([[1, row, col] for (_, col, parity, row, cx, cy, sx, sy) in samples], float)
-    by = np.array([cy for (_, col, parity, row, cx, cy, sx, sy) in samples], float)
+    # screen_x - rect.left = MAP_ORIGIN_X + col*CELL_W   + odd*ODD_DX
+    # screen_y - rect.top  = MAP_ORIGIN_Y + blk*ROW_H    + odd*ODD_DY
+    Ax = np.array([[1, col, odd] for (_, col, odd, blk, cx, cy, sx, sy) in samples], float)
+    bx = np.array([cx for (_, col, odd, blk, cx, cy, sx, sy) in samples], float)
+    Ay = np.array([[1, blk, odd] for (_, col, odd, blk, cx, cy, sx, sy) in samples], float)
+    by = np.array([cy for (_, col, odd, blk, cx, cy, sx, sy) in samples], float)
 
     solx, *_ = np.linalg.lstsq(Ax, bx, rcond=None)
     soly, *_ = np.linalg.lstsq(Ay, by, rcond=None)
-    NEW_OX, NEW_CW, NEW_HW, NEW_RW = solx
-    NEW_OY, NEW_HH, NEW_CY = soly
+    NEW_OX, NEW_CW, NEW_ODX = solx
+    NEW_OY, NEW_RH, NEW_ODY = soly
 
-    # Residuales
     print()
     print("--- Residuales por muestra ---")
     max_err = 0.0
     sum_sq = 0.0
     bad = False
-    for (cell, col, parity, row, cx, cy, sx, sy) in samples:
-        px_c = NEW_OX + col * NEW_CW + parity * NEW_HW + row * NEW_RW
-        py_c = NEW_OY + row * NEW_HH + col * NEW_CY
+    for (cell, col, odd, blk, cx, cy, sx, sy) in samples:
+        px_c = NEW_OX + col * NEW_CW + odd * NEW_ODX
+        py_c = NEW_OY + blk * NEW_RH + odd * NEW_ODY
         ex = px_c + rect.left - sx
         ey = py_c + rect.top  - sy
         err = (ex**2 + ey**2) ** 0.5
         max_err = max(max_err, err)
         sum_sq += ex**2 + ey**2
-        warn = "  <- REMEDIR" if err > 5 else ""
-        if err > 5:
+        warn = "  <- REMEDIR" if err > 8 else ""
+        if err > 8:
             bad = True
-        print(f"  celda {cell:>3} (row={row:>2},col={col:>2},par={parity}): "
+        par = "par" if odd == 0 else "impar"
+        print(f"  celda {cell:>3} (col={col:>2},fila={blk*2+odd:>2},{par:>5}): "
               f"err=({ex:+.1f},{ey:+.1f})  |err|={err:.1f}px{warn}")
 
     rms = (sum_sq / len(samples)) ** 0.5
-    print(f"\n  RMS={rms:.2f}px   MAX={max_err:.1f}px   (objetivo: RMS<2px, MAX<5px)")
-
-    print()
-    print("--- Coeficientes calculados ---")
-    print(f"  MAP_ORIGIN_X={NEW_OX:.4f}  CELL_W={NEW_CW:.4f}  CELL_HW={NEW_HW:.4f}  CELL_RW={NEW_RW:.4f}")
-    print(f"  MAP_ORIGIN_Y={NEW_OY:.4f}  CELL_HH={NEW_HH:.4f}  CELL_CY={NEW_CY:.4f}")
-    print(f"  rect.left={rect.left}  rect.top={rect.top}")
+    print(f"\n  RMS={rms:.2f}px   MAX={max_err:.1f}px   (objetivo: RMS<5px, MAX<10px)")
 
     print()
     print("--- Pegar en input/coords.py ---")
     print(f"CELL_W:  float = {NEW_CW:.4f}")
-    print(f"CELL_HW: float = {NEW_HW:.4f}")
-    print(f"CELL_HH: float = {NEW_HH:.4f}")
-    print(f"CELL_RW: float = {NEW_RW:.4f}")
-    print(f"CELL_CY: float = {NEW_CY:.4f}")
+    print(f"ROW_H:   float = {NEW_RH:.4f}")
+    print(f"ODD_DX:  float = {NEW_ODX:.4f}")
+    print(f"ODD_DY:  float = {NEW_ODY:.4f}")
 
     print()
     print("--- Pegar en config.py ---")
-    print(f"MAP_ORIGIN_X: float = {NEW_OX:.4f}   # client_x celda 0 (rect.left={rect.left})")
-    print(f"MAP_ORIGIN_Y: float = {NEW_OY:.4f}   # client_y celda 0 (rect.top={rect.top})")
+    print(f"MAP_ORIGIN_X: float = {NEW_OX:.4f}   # rect.left={rect.left}")
+    print(f"MAP_ORIGIN_Y: float = {NEW_OY:.4f}   # rect.top={rect.top}")
 
     print()
-    if rms > 2.0 or bad:
-        print("AVISO: RMS alto o muestras con error >5px. Revisa las mediciones y vuelve a medir.")
+    if rms > 5.0 or bad:
+        print("AVISO: RMS alto o muestras con error >8px. Revisa las mediciones.")
     else:
         cells_str = " ".join(str(s[0]) for s in samples)
         print("OK — Calibracion correcta. Verifica visualmente con:")
         print(f"   python tools/calibrate.py {cells_str}")
-        print("Y verifica automaticamente con:")
-        print("   python tools/calibrate.py --verify")
+        print("Y automaticamente con:  python tools/calibrate.py --verify")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

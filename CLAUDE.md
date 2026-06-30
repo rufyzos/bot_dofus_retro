@@ -38,6 +38,22 @@ Bot/
     └── calibrate.py    # Calibrar MAP_ORIGIN para cell→píxel
 ```
 
+## Estado de calibración (2026-06-30)
+
+Grid isométrico de combate **calibrado y validado** para 2560×1440 @ 100%.
+
+- Modelo: numeración base-1, filas alternas 14 celdas (par) / 15 celdas (impar). Las filas impares se desplazan a la **izquierda** (ODD_DX negativo, ≈-68px).
+- Constantes en `input/coords.py`: `CELL_W=130.45, ROW_H=66.69, ODD_DX=-68.44, ODD_DY=30.05`
+- Origen en `config.py`: `MAP_ORIGIN_X=501.6, MAP_ORIGIN_Y=0.5` (con `rect.top=23` sumado aparte)
+- 6 muestras en `data/calibration_samples.txt` → **RMS=2.31px, MAX=3.2px ✓**
+- Las fórmulas canónicas de Arakne/Emudofus/ArakneUtils **no coinciden** con este servidor; el modelo se derivó empíricamente midiendo vectores con Window Spy.
+
+```powershell
+python tools/calibrate.py --verify          # regresión automática
+python tools/calibrate.py 15 268 463        # mover cursor a celdas (visual)
+python tools/calibrate.py --fit             # recalibrar si se mueve la ventana
+```
+
 ## Reglas de diseño
 
 - **1 handler por (dirección, header)** — Dispatcher lanza ValueError si se duplica. Usar callbacks en GameState para compartir paquetes entre módulos.

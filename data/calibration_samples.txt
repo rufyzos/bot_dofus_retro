@@ -25,16 +25,16 @@
 #   fila IMPAR: screen_x = OX + col*130 + 65  ; screen_y = OY + blk*67 + 35
 #   OX≈371, OY≈16  (origen celda col=0,fila=0)
 #
-# ── Muestras FIABLES (consistentes, RMS≈5px, mismo mapa) ─────────────────────
+# ── Muestras FIABLES (modelo geométrico 14/15, RMS≈2.7px, mismo mapa) ────────
 # Medidas con "señalar celda" (cell_id del cliente) + Window Spy (centro del rombo).
+# Cubren filas par (127,448,268) e impar (15,193,463) y columnas extremas.
 15  436  52
 193 951  454
 463 2130 1055
+127 1805 292
+448 2068 1022
+268 1284 623
 
-# ── Pendiente de confirmar ────────────────────────────────────────────────────
-# 127 1805 292  — daba col=10 pero el píxel sugiere col=11 (error +130px = 1 columna).
-#                 Re-medir centro exacto del rombo, o confirmar fórmula en fila par alta.
-#
 # ── Descartadas (otro mapa / cell_id no fiable) ──────────────────────────────
 # 450 437 1060 / 456 1215 1061 / 18 694 60 / 255 1488 594  — series MITM antiguas,
 #   inconsistentes con el modelo geométrico actual (probablemente otro mapa).

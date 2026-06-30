@@ -53,8 +53,8 @@ WINDOW_TITLE_SUBSTR = "Dofus Retro"
 # Recalibrar con: python tools/calibrate.py --fit  (>=5 celdas, minimos cuadrados)
 # Verificar:      python tools/calibrate.py --verify
 # Cursor visual:  python tools/calibrate.py <cell_id> [...]
-MAP_ORIGIN_X: float = 76.562  # client_x celda 0 (rect.left=0), modelo isométrico canónico
-MAP_ORIGIN_Y: float =  4.727  # client_y celda 0 (rect.top=23),  modelo isométrico canónico
+MAP_ORIGIN_X: float = 501.6   # client_x celda col=0/fila=0 (rect.left=0), modelo geométrico
+MAP_ORIGIN_Y: float =   0.5   # client_y celda col=0/fila=0 (rect.top=23), modelo geométrico
 MAP_SCALE_X:  float = 1.0     # escala extra (constantes en coords.py absorben el zoom)
 MAP_SCALE_Y:  float = 1.0
 MAP_SCALE:    float = 1.0

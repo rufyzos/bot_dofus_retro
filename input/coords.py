@@ -1,30 +1,25 @@
 """
-Conversión cell_id (0-559) → coordenadas de píxel en pantalla.
+Conversión cell_id → coordenadas de píxel en pantalla.
 
-El grid de combate de Dofus Retro es 14 columnas × 40 filas = 560 celdas (0-559).
-La numeración de celdas es DIAGONAL (Arakne/CoordinateCell):
+MODELO GEOMÉTRICO (derivado empíricamente, 2026-06-30, 2560×1440 @ 100%).
 
-    WIDTH = 14
-    line   = cell // (WIDTH*2 - 1)     # = cell // 27
-    column = cell - line * (WIDTH*2-1)
-    offset = column % WIDTH
-    y = line - offset
-    x = (cell - (WIDTH-1) * y) // WIDTH
+Numeración de celdas: base-1, filas de ancho alterno:
+    fila 0 (par)   = 14 celdas -> cells 1..14
+    fila 1 (impar) = 15 celdas -> cells 15..29   (cell 15 = col 0)
+    fila 2 (par)   = 14 celdas -> cells 30..43
+    ... patrón: par=14, impar=15, cada par de filas = 29 celdas
 
-Sobre (x, y) Arakne, la rejilla isométrica se expresa con
-tres identidades exactas (verificadas para las 560 celdas):
+cellId -> (col, fila):
+    c = cell - 1 ; fila = 0 ; w = 14
+    mientras c >= w:  c -= w ; fila += 1 ; w = 14 si fila par, 15 si impar
+    col = c
 
-    row    = x + y                      # fila visual 0..39
-    parity = row % 2                    # 1 = fila impar (desplazada HW a la derecha)
-    col    = (x - y - parity) // 2     # posición dentro de la fila
+Proyección (las filas impares se desplazan media celda a la IZQUIERDA):
+    bloque = fila // 2
+    screen_x = OX + col*CELL_W   + (fila impar)*ODD_DX     (ODD_DX < 0)
+    screen_y = OY + bloque*ROW_H + (fila impar)*ODD_DY
 
-Proyección canónica (derivada de MapRenderer-DR/main.js + skew observado):
-    screen_x = OX + col*CELL_W + parity*CELL_HW + row*CELL_RW
-    screen_y = OY + row*CELL_HH + col*CELL_CY
-
-donde CELL_RW es el skew horizontal por fila (~-8px) y CELL_CY es el descenso
-en Y por columna (~0.3px), ambos de la geometría isométrica real del cliente.
-Ajuste exacto sobre 4 muestras MITM — RMS<0.5px.
+Validado contra 5 muestras (15,193,463,127,448) — RMS≈2.7px.
 
 Para recalibrar: python tools/calibrate.py --fit
 Para verificar:  python tools/calibrate.py --verify
@@ -33,26 +28,28 @@ Para verificar:  python tools/calibrate.py --verify
 from __future__ import annotations
 from input.window import WindowRect
 
-MAP_WIDTH = 14
+# Anchos de fila alternos (numeración base-1)
+ROW_EVEN_CELLS = 14   # filas pares
+ROW_ODD_CELLS  = 15   # filas impares
 
-# Constantes isométricas canónicas calibradas (px, 2560×1440 @ 100%)
-# Fit exacto sobre muestras MITM (450,456,18,255). rect.left=0, rect.top=23.
-# Fuente del modelo: MapRenderer-DR + análisis de skew del grid real.
-CELL_W:  float = 129.667   # ancho de columna en px
-CELL_HW: float = 106.802   # offset fila impar (absorbe el skew inicial de parity)
-CELL_HH: float =  31.235   # altura de media fila en px
-CELL_RW: float =  -8.031   # skew horizontal por fila (el grid se inclina ~-8px/fila a la izq.)
-CELL_CY: float =   0.305   # descenso en Y por columna (componente Y de la inclinación)
+# Constantes de proyección calibradas (px, 2560×1440 @ 100%)
+# Ajuste por mínimos cuadrados sobre 5 muestras. rect.left=0, rect.top=23.
+CELL_W:  float = 130.45    # avance horizontal por columna
+ROW_H:   float =  66.69    # avance vertical por bloque (2 filas)
+ODD_DX:  float = -68.44    # desplazamiento X de filas impares (a la izquierda)
+ODD_DY:  float =  30.05    # desplazamiento Y de filas impares
 
 
-def cell_to_arakne(cell: int) -> tuple[int, int]:
-    """Convierte cell_id al sistema de coordenadas diagonal de Dofus (Arakne)."""
-    line = cell // (MAP_WIDTH * 2 - 1)
-    column = cell - line * (MAP_WIDTH * 2 - 1)
-    offset = column % MAP_WIDTH
-    y = line - offset
-    x = (cell - (MAP_WIDTH - 1) * y) // MAP_WIDTH
-    return x, y
+def cell_to_colrow(cell: int) -> tuple[int, int]:
+    """cell_id (base-1) → (columna, fila visual). Filas alternan 14/15 celdas."""
+    c = cell - 1
+    fila = 0
+    w = ROW_EVEN_CELLS
+    while c >= w:
+        c -= w
+        fila += 1
+        w = ROW_EVEN_CELLS if fila % 2 == 0 else ROW_ODD_CELLS
+    return c, fila
 
 
 def cell_to_screen(
@@ -73,11 +70,10 @@ def cell_to_screen(
     sx = scale_x if scale_x is not None else scale
     sy = scale_y if scale_y is not None else scale
 
-    x, y = cell_to_arakne(cell)
-    row    = x + y
-    parity = row % 2
-    col    = (x - y - parity) // 2
+    col, fila = cell_to_colrow(cell)
+    bloque = fila // 2
+    odd = fila % 2
 
-    screen_x = int(rect.left + (origin_x + col * CELL_W + parity * CELL_HW + row * CELL_RW) * sx)
-    screen_y = int(rect.top  + (origin_y + row * CELL_HH + col * CELL_CY) * sy)
+    screen_x = int(rect.left + (origin_x + col * CELL_W + odd * ODD_DX) * sx)
+    screen_y = int(rect.top  + (origin_y + bloque * ROW_H + odd * ODD_DY) * sy)
     return screen_x, screen_y
